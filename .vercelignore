@@ -1,0 +1,4 @@
+# Vercel only serves the frontend in web/; the Python backend runs on Render.
+/*
+!/web
+!/vercel.json

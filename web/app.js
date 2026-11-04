@@ -22,8 +22,44 @@ const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
 async function api(path, options = {}) {
   const response = await fetch(path, options);
   const data = await response.json().catch(() => ({}));
+  if (response.status === 401 && path !== "/api/login") {
+    showLogin();
+    throw new Error("Sign in to continue");
+  }
   if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
   return data;
+}
+
+// Shown when the server has a password set (NS_ACCESS_PASSWORD) and this browser isn't signed in.
+function showLogin() {
+  if (ui.needLogin) return;
+  ui.needLogin = true;
+  clearTimeout(ui.poll);
+  teardownHome();
+  document.body.className = "mode-ws";
+  document.title = "Sign in · NaturalSketch";
+  app.innerHTML = `
+    <div class="login">
+      <form id="login" class="login-card">
+        <span class="brand-mark"><i data-lucide="pen-tool"></i></span>
+        <h1>Natural<em>Sketch</em></h1>
+        <p>This studio is private. Enter the password to continue.</p>
+        <input id="password" type="password" autocomplete="current-password" placeholder="Password" required>
+        <button class="btn btn-accent" type="submit"><i data-lucide="log-in"></i>Sign in</button>
+      </form>
+    </div>`;
+  icons();
+  $("#password").focus();
+  $("#login").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: $("#password").value }) });
+      location.reload();
+    } catch (err) {
+      flash(err.message);
+      $("#password").select();
+    }
+  });
 }
 
 function timeAgo(seconds) {
@@ -88,6 +124,7 @@ const SCENE_START = { ...sceneState };
 // ------------------------------------------------------------------ routing
 
 function route() {
+  if (ui.needLogin) return;
   clearTimeout(ui.poll);
   teardownHome();
   const match = location.hash.match(/^#\/p\/([a-f0-9]+)/);
@@ -621,6 +658,7 @@ async function refresh(pid) {
   try {
     project = await api(`/api/projects/${pid}`);
   } catch (e) {
+    if (ui.needLogin) return;
     app.innerHTML = `<div class="fullpage-msg"><p>${esc(e.message)}</p><a href="#/" class="btn btn-ghost"><i data-lucide="arrow-left"></i>Back to all apps</a></div>`;
     icons();
     return;

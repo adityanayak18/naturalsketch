@@ -68,23 +68,42 @@ app = FastAPI(title="NaturalSketch", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
+COOKIE = "ns_key"
+OPEN_PATHS = {"/healthz", "/api/login"}
+
+
 @app.middleware("http")
 async def split_origins(request: Request, call_next):
     host, path = request.url.hostname, request.url.path
     query = f"?{request.url.query}" if request.url.query else ""
+    if path in OPEN_PATHS:
+        return await call_next(request)
     if path.startswith("/preview/"):
         if host != PREVIEW_HOST:
             return RedirectResponse(f"{PREVIEW_ORIGIN}{path}{query}")
-    elif host == PREVIEW_HOST:
-        if path.startswith("/api/"):
-            return JSONResponse({"detail": "Not available from generated apps"}, status_code=403)
+        return await call_next(request)
+    is_api = path.startswith("/api/")
+    if host == PREVIEW_HOST and not is_api:
         return RedirectResponse(f"{APP_ORIGIN}{path}{query}")
-    elif ACCESS_PASSWORD and not _authorized(request):
-        return Response("Password required", status_code=401, headers={"WWW-Authenticate": 'Basic realm="NaturalSketch"'})
+    if host == PREVIEW_HOST and not ACCESS_PASSWORD:
+        # Generated apps run on this host, so without a password the API must stay off it.
+        # (With the frontend on Vercel, its /api proxy also arrives here: set NS_ACCESS_PASSWORD.)
+        return JSONResponse({"detail": "Not available from generated apps"}, status_code=403)
+    # The page and its scripts are public (as on Vercel); only the API needs the password.
+    if ACCESS_PASSWORD and is_api and not _authorized(request):
+        return JSONResponse({"detail": "Password required"}, status_code=401)
     return await call_next(request)
 
 
+def _token() -> str:
+    return hmac.new(ACCESS_PASSWORD.encode(), b"naturalsketch-session", "sha256").hexdigest()
+
+
 def _authorized(request: Request) -> bool:
+    """The sign-in cookie (set by /api/login on the builder's own domain, so generated apps on
+    the preview domain never have it), or a Basic auth header for scripts and curl."""
+    if hmac.compare_digest(request.cookies.get(COOKIE, ""), _token()):
+        return True
     header = request.headers.get("authorization", "")
     if not header.lower().startswith("basic "):
         return False
@@ -93,6 +112,29 @@ def _authorized(request: Request) -> bool:
     except Exception:
         return False
     return hmac.compare_digest(password, ACCESS_PASSWORD)
+
+
+class Login(BaseModel):
+    password: str
+
+
+@app.post("/api/login")
+def login(body: Login) -> Response:
+    if not ACCESS_PASSWORD:
+        return JSONResponse({"ok": True})
+    if not hmac.compare_digest(body.password, ACCESS_PASSWORD):
+        raise HTTPException(401, "Wrong password")
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        COOKIE, _token(), max_age=30 * 86400, httponly=True, samesite="lax",
+        secure=APP_ORIGIN.startswith("https://"), path="/",
+    )
+    return response
+
+
+@app.get("/healthz")
+def healthz() -> dict:
+    return {"ok": True}
 
 
 def _project(pid: str) -> dict:

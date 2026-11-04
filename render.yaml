@@ -1,0 +1,37 @@
+# Render Blueprint for the NaturalSketch backend (API, build jobs, previews of generated apps).
+# The frontend is served by Vercel, which forwards /api/* here (see vercel.json).
+services:
+  - type: web
+    name: naturalsketch-api
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: HOST
+        value: 0.0.0.0
+      # The Vercel address of the frontend, e.g. https://naturalsketch.vercel.app
+      # (later https://naturalsketch.openarc.in)
+      - key: NS_APP_ORIGIN
+        sync: false
+      # This service's own address, e.g. https://naturalsketch-api.onrender.com
+      - key: NS_PREVIEW_ORIGIN
+        sync: false
+      # Required in this setup: the password for the studio.
+      - key: NS_ACCESS_PASSWORD
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_PASSWORD
+        sync: false
