@@ -22,44 +22,309 @@ const ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
 async function api(path, options = {}) {
   const response = await fetch(path, options);
   const data = await response.json().catch(() => ({}));
-  if (response.status === 401 && path !== "/api/login") {
-    showLogin();
-    throw new Error("Sign in to continue");
+  if (response.status === 401 && path !== "/api/session") {
+    clearTimeout(ui.poll);
+    ui.user = null;
+    ui.token = null;
+    renderAccount();
+    openAuth("signin", "Please sign in to continue.");
+    throw new Error("Sign in to continue.");
   }
   if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
   return data;
 }
 
-// Shown when the server has a password set (NS_ACCESS_PASSWORD) and this browser isn't signed in.
-function showLogin() {
-  if (ui.needLogin) return;
-  ui.needLogin = true;
-  clearTimeout(ui.poll);
-  teardownHome();
-  document.body.className = "mode-ws";
-  document.title = "Sign in · NaturalSketch";
-  app.innerHTML = `
-    <div class="login">
-      <form id="login" class="login-card">
-        <span class="brand-mark"><i data-lucide="pen-tool"></i></span>
-        <h1>Natural<em>Sketch</em></h1>
-        <p>This studio is private. Enter the password to continue.</p>
-        <input id="password" type="password" autocomplete="current-password" placeholder="Password" required>
-        <button class="btn btn-accent" type="submit"><i data-lucide="log-in"></i>Sign in</button>
-      </form>
-    </div>`;
-  icons();
-  $("#password").focus();
-  $("#login").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    try {
-      await api("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: $("#password").value }) });
-      location.reload();
-    } catch (err) {
-      flash(err.message);
-      $("#password").select();
+// ------------------------------------------------------------------ accounts (Supabase Auth)
+
+const SUPABASE_JS = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js";
+const authState = { enabled: false, client: null };
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src;
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("Couldn't load the sign-in library. Check your connection."));
+    document.head.appendChild(s);
+  });
+}
+
+async function initAuth(config) {
+  if (!config) {
+    ui.user = { local: true, name: "You" }; // local single-user mode: no accounts
+    return;
+  }
+  authState.enabled = true;
+  await loadScript(SUPABASE_JS);
+  authState.client = window.supabase.createClient(config.url, config.anon_key, {
+    auth: { flowType: "pkce", persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+  });
+  authState.client.auth.onAuthStateChange((event, session) => {
+    // Don't await Supabase calls in here; only our own API.
+    if (event === "PASSWORD_RECOVERY") setTimeout(() => openAuth("recover"), 0);
+    if (event === "SIGNED_OUT") {
+      ui.user = null;
+      ui.token = null;
+      renderAccount();
+    } else if (session && session.access_token !== ui.token) {
+      setTimeout(() => syncSession(session), 0);
     }
   });
+  const { data } = await authState.client.auth.getSession();
+  if (data.session) await syncSession(data.session);
+}
+
+// Hand the access token to the server, which keeps it in an HttpOnly cookie for this domain.
+async function syncSession(session) {
+  if (!session || session.access_token === ui.token) return;
+  ui.token = session.access_token;
+  try {
+    const result = await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ access_token: session.access_token }) });
+    ui.user = result.user;
+    ui.usage = result.usage;
+  } catch (e) {
+    ui.user = null;
+    ui.token = null;
+  }
+  renderAccount();
+}
+
+async function signOut() {
+  closeMenus();
+  try {
+    if (authState.client) await authState.client.auth.signOut();
+    await fetch("/api/session", { method: "DELETE" });
+  } catch (e) {
+    /* signed out locally either way */
+  }
+  ui.user = null;
+  ui.token = null;
+  ui.usage = null;
+  if (location.hash.startsWith("#/p/")) location.hash = "#/";
+  else route();
+}
+
+const signedIn = () => Boolean(ui.user);
+
+function usageText() {
+  const u = ui.usage;
+  if (!u || u.limit == null) return "Unlimited builds";
+  const left = Math.max(0, u.limit - u.used);
+  return `${left} of ${u.limit} builds left today`;
+}
+
+async function refreshUsage() {
+  if (!authState.enabled || !signedIn()) return;
+  try {
+    const result = await api("/api/me");
+    ui.usage = result.usage;
+    renderAccount();
+  } catch (e) {
+    /* shown on the next action */
+  }
+}
+
+function renderAccount() {
+  $$(".account").forEach((host) => {
+    if (!authState.enabled) {
+      host.innerHTML = "";
+      return;
+    }
+    if (!signedIn()) {
+      host.innerHTML = `<button type="button" class="btn btn-ink sm" data-auth="signin"><i data-lucide="log-in"></i>Sign in</button>`;
+    } else {
+      const u = ui.user;
+      const face = u.avatar
+        ? `<img src="${esc(u.avatar)}" alt="" referrerpolicy="no-referrer">`
+        : `<span>${esc((u.name || u.email || "?").charAt(0).toUpperCase())}</span>`;
+      host.innerHTML = `
+        <button type="button" class="account-chip" aria-haspopup="menu" aria-expanded="false">${face}<b class="hide-sm">${esc(u.name || u.email)}</b><i data-lucide="chevron-down"></i></button>
+        <div class="account-menu" role="menu" hidden>
+          <div class="account-who"><b>${esc(u.name || "")}</b><span>${esc(u.email)}</span></div>
+          <div class="account-usage"><i data-lucide="gauge"></i>${esc(usageText())}</div>
+          <a href="#/" role="menuitem" class="account-item"><i data-lucide="layout-grid"></i>My apps</a>
+          <button type="button" role="menuitem" class="account-item" data-signout><i data-lucide="log-out"></i>Sign out</button>
+        </div>`;
+      const chip = host.querySelector(".account-chip");
+      const menu = host.querySelector(".account-menu");
+      chip.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const open = menu.hidden;
+        closeMenus();
+        menu.hidden = !open;
+        chip.setAttribute("aria-expanded", String(open));
+      });
+      host.querySelector("[data-signout]").addEventListener("click", signOut);
+      host.querySelector('a[href="#/"]').addEventListener("click", () => {
+        closeMenus();
+        if (!location.hash.startsWith("#/p/")) setTimeout(() => scrollToSection("archive"), 50);
+      });
+    }
+    host.querySelectorAll("[data-auth]").forEach((b) => b.addEventListener("click", () => openAuth(b.dataset.auth)));
+  });
+  icons();
+}
+
+function closeMenus() {
+  $$(".account-menu").forEach((m) => (m.hidden = true));
+  $$(".account-chip").forEach((c) => c.setAttribute("aria-expanded", "false"));
+}
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".account")) closeMenus();
+});
+
+// The sign-in window: sign in, create account, forgot password, and set a new password.
+function openAuth(mode = "signin", note = "") {
+  if (!authState.enabled) return;
+  closeMenus();
+  let dialog = $("#auth");
+  if (!dialog) {
+    dialog = document.createElement("div");
+    dialog.id = "auth";
+    dialog.className = "auth-backdrop";
+    document.body.appendChild(dialog);
+    dialog.addEventListener("click", (e) => {
+      if (e.target === dialog) closeAuth();
+    });
+  }
+  const titles = {
+    signin: ["Welcome back", "Sign in to your studio."],
+    signup: ["Create your studio", "A free account keeps your apps, versions and chats."],
+    forgot: ["Reset your password", "We'll email you a link to choose a new one."],
+    recover: ["Choose a new password", "Enter it twice and you're back in."],
+  };
+  const [title, sub] = titles[mode];
+  const google = mode === "signin" || mode === "signup";
+  dialog.innerHTML = `
+    <form class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title" novalidate>
+      <button type="button" class="icon-btn auth-close" aria-label="Close" data-close><i data-lucide="x"></i></button>
+      <span class="brand-mark"><i data-lucide="pen-tool"></i></span>
+      <h2 id="auth-title">${title}</h2>
+      <p class="auth-sub">${esc(note || sub)}</p>
+      ${google ? `
+        <button type="button" class="btn btn-ghost auth-google" data-google>
+          <svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
+          Continue with Google
+        </button>
+        <div class="auth-or"><span>or with email</span></div>` : ""}
+      ${mode !== "recover" ? `<label class="auth-field"><span>Email</span><input name="email" type="email" autocomplete="email" required placeholder="you@example.com"></label>` : ""}
+      ${mode === "signin" || mode === "signup" || mode === "recover" ? `
+        <label class="auth-field"><span>${mode === "recover" ? "New password" : "Password"}</span>
+          <input name="password" type="password" minlength="8" required autocomplete="${mode === "signin" ? "current-password" : "new-password"}" placeholder="${mode === "signin" ? "Your password" : "At least 8 characters"}">
+        </label>` : ""}
+      ${mode === "recover" ? `<label class="auth-field"><span>Repeat password</span><input name="password2" type="password" minlength="8" required autocomplete="new-password"></label>` : ""}
+      ${mode === "signin" ? `<button type="button" class="auth-link auth-forgot" data-mode="forgot">Forgot password?</button>` : ""}
+      <div class="auth-msg" role="status" hidden></div>
+      <button type="submit" class="btn btn-accent auth-submit">${{ signin: "Sign in", signup: "Create account", forgot: "Send reset link", recover: "Save new password" }[mode]}</button>
+      <p class="auth-switch">
+        ${mode === "signin" ? `New here? <button type="button" class="auth-link" data-mode="signup">Create an account</button>` : ""}
+        ${mode === "signup" ? `Already have an account? <button type="button" class="auth-link" data-mode="signin">Sign in</button>` : ""}
+        ${mode === "forgot" ? `<button type="button" class="auth-link" data-mode="signin">Back to sign in</button>` : ""}
+      </p>
+    </form>`;
+  dialog.hidden = false;
+  document.body.classList.add("auth-open");
+  icons();
+  const form = dialog.querySelector("form");
+  const msg = form.querySelector(".auth-msg");
+  const say = (text, tone = "bad") => {
+    msg.hidden = !text;
+    msg.className = `auth-msg ${tone}`;
+    msg.textContent = text;
+  };
+  const submit = form.querySelector(".auth-submit");
+  const busyButton = (on) => {
+    submit.disabled = on;
+    submit.classList.toggle("loading", on);
+  };
+  const redirect = location.origin + location.pathname;
+
+  form.querySelector("[data-close]").addEventListener("click", closeAuth);
+  form.querySelectorAll("[data-mode]").forEach((b) => b.addEventListener("click", () => openAuth(b.dataset.mode)));
+  const g = form.querySelector("[data-google]");
+  if (g) {
+    g.addEventListener("click", async () => {
+      // Remember where we were; Google sends the browser back to the page root.
+      try {
+        sessionStorage.setItem("ns:return", location.hash);
+      } catch (e) {
+        /* fine without */
+      }
+      const { error } = await authState.client.auth.signInWithOAuth({ provider: "google", options: { redirectTo: redirect } });
+      if (error) say(error.message);
+    });
+  }
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const email = form.email ? form.email.value.trim() : "";
+    const password = form.password ? form.password.value : "";
+    if (form.email && !/^\S+@\S+\.\S+$/.test(email)) return say("Enter a valid email address.");
+    if (form.password && password.length < 8) return say("Passwords need at least 8 characters.");
+    if (mode === "recover" && password !== form.password2.value) return say("The two passwords don't match.");
+    say("");
+    busyButton(true);
+    try {
+      const a = authState.client.auth;
+      if (mode === "signin") {
+        const { data, error } = await a.signInWithPassword({ email, password });
+        if (error) throw error;
+        await afterSignIn(data.session);
+      } else if (mode === "signup") {
+        const { data, error } = await a.signUp({ email, password, options: { emailRedirectTo: redirect } });
+        if (error) throw error;
+        if (data.session) await afterSignIn(data.session);
+        else say(`Almost there: we sent a confirmation link to ${email}. Open it to finish creating your account.`, "ok");
+      } else if (mode === "forgot") {
+        const { error } = await a.resetPasswordForEmail(email, { redirectTo: redirect });
+        if (error) throw error;
+        say(`If ${email} has an account, a reset link is on its way.`, "ok");
+      } else if (mode === "recover") {
+        const { data, error } = await a.updateUser({ password });
+        if (error) throw error;
+        const { data: s } = await a.getSession();
+        await afterSignIn(s.session || (data && data.session));
+        flash("Password updated.");
+      }
+    } catch (err) {
+      say(friendlyAuthError(err));
+    } finally {
+      busyButton(false);
+    }
+  });
+  const first = form.querySelector("input");
+  if (first) setTimeout(() => first.focus(), 50);
+}
+
+function friendlyAuthError(err) {
+  const m = (err && err.message) || String(err);
+  if (/invalid login credentials/i.test(m)) return "That email and password don't match. Try again, or reset your password.";
+  if (/email not confirmed/i.test(m)) return "Please confirm your email first: open the link we sent you.";
+  if (/already registered|already exists/i.test(m)) return "There's already an account with this email. Sign in instead.";
+  if (/rate limit|too many/i.test(m)) return "Too many attempts. Please wait a minute and try again.";
+  return m;
+}
+
+function closeAuth() {
+  const dialog = $("#auth");
+  if (dialog) dialog.hidden = true;
+  document.body.classList.remove("auth-open");
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("#auth") && !$("#auth").hidden) closeAuth();
+});
+
+async function afterSignIn(session) {
+  await syncSession(session);
+  if (!signedIn()) throw new Error("Couldn't start your session. Please try again.");
+  closeAuth();
+  flash(`Signed in as ${ui.user.email}`, "ok");
+  if ($("#home")) {
+    loadProjects();
+    if (ui.pendingBuild && $("#composer")) {
+      ui.pendingBuild = false;
+      $("#composer").requestSubmit();
+    }
+  } else route();
 }
 
 function timeAgo(seconds) {
@@ -70,9 +335,9 @@ function timeAgo(seconds) {
   return new Date(seconds * 1000).toLocaleDateString();
 }
 
-function flash(message) {
+function flash(message, tone = "bad") {
   const el = document.createElement("div");
-  el.className = "toast";
+  el.className = `toast toast-${tone}`;
   el.setAttribute("role", "alert");
   el.textContent = message;
   document.body.appendChild(el);
@@ -124,11 +389,14 @@ const SCENE_START = { ...sceneState };
 // ------------------------------------------------------------------ routing
 
 function route() {
-  if (ui.needLogin) return;
   clearTimeout(ui.poll);
+  closeMenus();
   teardownHome();
   const match = location.hash.match(/^#\/p\/([a-f0-9]+)/);
-  if (match) openProject(match[1]);
+  if (match && authState.enabled && !signedIn()) {
+    renderHome();
+    openAuth("signin", "Sign in to open this app.");
+  } else if (match) openProject(match[1]);
   else renderHome();
 }
 window.addEventListener("hashchange", route);
@@ -158,6 +426,7 @@ async function renderHome() {
             <button type="button" data-scroll="archive">Archive</button>
           </nav>
           <div id="providers" class="providers"></div>
+          <div class="account"></div>
         </div>
       </header>
 
@@ -266,6 +535,7 @@ async function renderHome() {
     </div>`;
   $("#today").textContent = new Date().toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" });
   icons();
+  renderAccount();
   bindComposer();
   renderThumbs();
   $$("[data-scroll]").forEach((b) => b.addEventListener("click", () => scrollToSection(b.dataset.scroll)));
@@ -379,6 +649,16 @@ async function loadStatus() {
 
 async function loadProjects() {
   const host = $("#project-list");
+  if (host && authState.enabled && !signedIn()) {
+    const count = $("#app-count");
+    if (count) count.textContent = "";
+    host.innerHTML = `<div class="empty"><i data-lucide="lock-keyhole"></i><p>Your apps are private to your account.</p>
+      <div class="empty-actions"><button type="button" class="btn btn-accent sm" data-auth="signup">Create a free account</button><button type="button" class="btn btn-ghost sm" data-auth="signin">Sign in</button></div></div>`;
+    host.querySelectorAll("[data-auth]").forEach((b) => b.addEventListener("click", () => openAuth(b.dataset.auth)));
+    icons();
+    refreshTriggers();
+    return;
+  }
   let list = [];
   try {
     list = await api("/api/projects");
@@ -503,17 +783,23 @@ function bindComposer() {
       flash("Add a sketch or describe your app first.");
       return;
     }
+    if (authState.enabled && !signedIn()) {
+      ui.pendingBuild = true; // build straight after signing in; the brief stays as typed
+      openAuth("signup", "Create a free account to build your app. Your brief and sketches are kept.");
+      return;
+    }
     const button = $("#build");
     button.disabled = true;
     button.innerHTML = `<i data-lucide="loader-2" class="spin"></i><span>Starting…</span>`;
     icons();
-    const form = new FormData();
-    form.append("prompt", prompt);
-    form.append("features", $("#features").value);
-    ui.files.forEach(({ file }) => form.append("images", file));
     try {
+      const form = new FormData();
+      form.append("prompt", prompt);
+      form.append("features", $("#features").value);
+      for (const { file } of ui.files) form.append("images", await shrinkImage(file));
       const { id } = await api("/api/projects", { method: "POST", body: form });
       ui.files = [];
+      refreshUsage();
       location.hash = `#/p/${id}`;
     } catch (err) {
       flash(err.message);
@@ -522,6 +808,27 @@ function bindComposer() {
       icons();
     }
   });
+}
+
+// Big photos are scaled down in the browser first: uploads stay small and fast, and well under
+// the size limit of the Vercel → Render proxy. 2000px is plenty for reading a sketch.
+async function shrinkImage(file, max = 2000) {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, max / Math.max(bitmap.width, bitmap.height));
+    if (scale === 1 && file.size < 1.5 * 1024 * 1024) return file;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#fff"; // transparent PNGs become white, like paper
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.88));
+    return blob ? new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" }) : file;
+  } catch (e) {
+    return file;
+  }
 }
 
 function renderThumbs() {
@@ -571,6 +878,7 @@ async function openProject(pid) {
           <label class="select-wrap" title="Versions"><i data-lucide="history"></i><select id="versions" aria-label="Version"></select></label>
           <a id="open-tab" target="_blank" rel="noopener" class="btn btn-ghost sm hide-sm"><i data-lucide="external-link"></i>Open</a>
           <a id="download" class="btn btn-accent sm"><i data-lucide="download"></i>Export</a>
+          <div class="account"></div>
         </div>
       </header>
       <div class="ws-body">
@@ -604,6 +912,7 @@ async function openProject(pid) {
       </div>
     </div>`;
   icons();
+  renderAccount();
   if (window.gsap && !reducedMotion()) {
     gsap.from(".ws-bar", { y: -20, opacity: 0, duration: 0.6, ease: "power3.out" });
     gsap.from(".ws-side", { x: -30, opacity: 0, duration: 0.7, ease: "power3.out", delay: 0.05 });
@@ -658,7 +967,7 @@ async function refresh(pid) {
   try {
     project = await api(`/api/projects/${pid}`);
   } catch (e) {
-    if (ui.needLogin) return;
+    if (authState.enabled && !signedIn()) return;
     app.innerHTML = `<div class="fullpage-msg"><p>${esc(e.message)}</p><a href="#/" class="btn btn-ghost"><i data-lucide="arrow-left"></i>Back to all apps</a></div>`;
     icons();
     return;
@@ -896,8 +1205,10 @@ async function sendMessage(pid, text) {
   $("#message").value = "";
   try {
     await api(`/api/projects/${pid}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
+    refreshUsage();
   } catch (e) {
     flash(e.message);
+    if ($("#message") && !$("#message").value) $("#message").value = text; // don't lose what they typed
   }
   refresh(pid);
 }
@@ -921,10 +1232,32 @@ async function restore(pid, version) {
   refresh(pid);
 }
 
-api("/api/status")
-  .then((status) => {
+// Startup: server settings, then the signed-in user (if any), then the page.
+(async () => {
+  let status = null;
+  try {
+    status = await api("/api/status");
     ui.status = status;
     if (status.preview_origin) PREVIEW = status.preview_origin;
-  })
-  .catch(() => {})
-  .finally(route);
+  } catch (e) {
+    /* the page still renders */
+  }
+  try {
+    await initAuth(status && status.auth);
+  } catch (e) {
+    flash(e.message);
+  }
+  // Coming back from Google sign-in: return to where the person was.
+  try {
+    const back = sessionStorage.getItem("ns:return");
+    if (back != null) {
+      sessionStorage.removeItem("ns:return");
+      if (back && back !== location.hash) {
+        history.replaceState(null, "", location.pathname + back);
+      }
+    }
+  } catch (e) {
+    /* fine without */
+  }
+  route();
+})();

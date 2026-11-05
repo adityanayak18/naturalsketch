@@ -21,8 +21,15 @@ services:
       # This service's own address; generated apps are previewed here.
       - key: NS_PREVIEW_ORIGIN
         value: https://naturalsketch-api.onrender.com
-      # Required in this setup: the password for the studio.
-      - key: NS_ACCESS_PASSWORD
+      # Builds + chat edits per account per day (0 = unlimited).
+      - key: NS_DAILY_LIMIT
+        value: "20"
+      # Set these in the Render dashboard (Environment), never in this file:
+      # Supabase > Project Settings > API Keys > publishable (or anon) key. Turns accounts on.
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      # Your own sign-in email(s), comma-separated: unlimited builds, and owner of older projects.
+      - key: NS_ADMIN_EMAIL
         sync: false
       - key: GEMINI_API_KEY
         sync: false

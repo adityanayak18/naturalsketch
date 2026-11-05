@@ -83,6 +83,19 @@ create table if not exists naturalsketch.logs (
     created_at timestamptz not null default now()
 );
 create index if not exists logs_by_project on naturalsketch.logs (project_id, id);
+
+-- Accounts: each project belongs to a Supabase Auth user (their id). Older projects have none
+-- until the admin account claims them.
+alter table naturalsketch.projects add column if not exists owner_id text;
+create index if not exists projects_by_owner on naturalsketch.projects (owner_id, updated_at desc);
+
+-- Builds and chat edits per user per day, so one account can't use up the shared AI quota.
+create table if not exists naturalsketch.usage (
+    owner_id text not null,
+    day      date not null default current_date,
+    actions  integer not null default 0,
+    primary key (owner_id, day)
+);
 """
 
 _pool: ConnectionPool | None = None
@@ -160,13 +173,13 @@ def _check(pid: str) -> None:
 
 # ---------------------------------------------------------------- projects
 
-def create(prompt: str, features: list[str], images: list[tuple[bytes, str, str]]) -> str:
+def create(prompt: str, features: list[str], images: list[tuple[bytes, str, str]], owner: str | None = None) -> str:
     """images: (data, mime, kind) where kind is 'sketch' or 'screenshot'. Returns the new id."""
     pid = secrets.token_hex(5)
     with pool().connection() as conn, conn.transaction():
         conn.execute(
-            "insert into naturalsketch.projects (id, prompt, features) values (%s, %s, %s)",
-            (pid, prompt, Jsonb(features)),
+            "insert into naturalsketch.projects (id, prompt, features, owner_id) values (%s, %s, %s, %s)",
+            (pid, prompt, Jsonb(features), owner),
         )
         for index, (data, mime, kind) in enumerate(images):
             conn.execute(
@@ -206,7 +219,8 @@ def load(pid: str) -> dict:
     return row
 
 
-def list_all() -> list[dict]:
+def list_all(owner: str | None = None) -> list[dict]:
+    """The owner's projects, newest first. owner=None (local single-user mode) lists everything."""
     return _all(
         """
         select p.id, p.name, p.status, p.current_version as current, left(p.prompt, 160) as prompt,
@@ -214,10 +228,46 @@ def list_all() -> list[dict]:
                (select count(*) from naturalsketch.versions v where v.project_id = p.id)::int as versions,
                (select min(u.idx)::text from naturalsketch.uploads u where u.project_id = p.id) as thumbnail
         from naturalsketch.projects p
+        where %(owner)s::text is null or p.owner_id = %(owner)s
         order by p.updated_at desc
         limit 200
-        """
+        """,
+        {"owner": owner},
     )
+
+
+def owner_of(pid: str) -> str | None:
+    """Raises KeyError if the project doesn't exist."""
+    _check(pid)
+    row = _one("select owner_id from naturalsketch.projects where id = %s", (pid,))
+    if row is None:
+        raise KeyError(pid)
+    return row["owner_id"]
+
+
+def claim_unowned(owner: str) -> int:
+    """Give every project without an owner to this account (used once for the admin)."""
+    with pool().connection() as conn:
+        return conn.execute("update naturalsketch.projects set owner_id = %s where owner_id is null", (owner,)).rowcount
+
+
+def take_action(owner: str, daily_limit: int) -> bool:
+    """Count one build or chat edit for today. False if the owner is already at the limit."""
+    row = _one(
+        """
+        insert into naturalsketch.usage as u (owner_id, day, actions) values (%(o)s, current_date, 1)
+        on conflict (owner_id, day) do update set actions = u.actions + 1
+        where u.actions < %(limit)s
+        returning actions
+        """,
+        {"o": owner, "limit": daily_limit},
+    )
+    return row is not None
+
+
+def actions_today(owner: str) -> int:
+    row = _one("select actions from naturalsketch.usage where owner_id = %s and day = current_date", (owner,))
+    return row["actions"] if row else 0
 
 
 def update(pid: str, **fields) -> None:
