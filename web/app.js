@@ -270,12 +270,12 @@ function openAuth(mode = "signin", note = "") {
         if (error) throw error;
         await afterSignIn(data.session);
       } else if (mode === "signup") {
-        const { data, error } = await a.signUp({ email, password, options: { emailRedirectTo: redirect } });
+        const { data, error } = await a.signUp({ email, password, options: { emailRedirectTo: redirect + "?from=confirm" } });
         if (error) throw error;
         if (data.session) await afterSignIn(data.session);
         else say(`Almost there: we sent a confirmation link to ${email}. Open it to finish creating your account.`, "ok");
       } else if (mode === "forgot") {
-        const { error } = await a.resetPasswordForEmail(email, { redirectTo: redirect });
+        const { error } = await a.resetPasswordForEmail(email, { redirectTo: redirect + "?from=reset" });
         if (error) throw error;
         say(`If ${email} has an account, a reset link is on its way.`, "ok");
       } else if (mode === "recover") {
@@ -1271,8 +1271,42 @@ async function restore(pid, version) {
   refresh(pid);
 }
 
+// What an email link or Google brought back in the address, read before supabase-js tidies it.
+// Confirmation links often open in another browser (e.g. a mail app's), where the sign-in can't
+// be finished automatically even though the email is now confirmed; then we say so.
+function readAuthReturn() {
+  const query = new URLSearchParams(location.search);
+  const hash = new URLSearchParams(location.hash.startsWith("#") && !location.hash.startsWith("#/") ? location.hash.slice(1) : "");
+  const get = (k) => query.get(k) || hash.get(k);
+  return { code: Boolean(get("code")), error: get("error_description") || get("error"), type: get("type"), from: query.get("from") };
+}
+
+function tidyAuthAddress() {
+  const hash = location.hash.startsWith("#/") ? location.hash : "";
+  if (location.search || location.hash !== hash) history.replaceState(null, "", location.pathname + hash);
+}
+
+function explainAuthReturn(back) {
+  if (!authState.enabled) return;
+  if (back.error) {
+    const expired = /expired|invalid/i.test(back.error);
+    openAuth("signin", expired
+      ? "That link has expired or was already used. Sign in below, or use “Forgot password?” to get a new link."
+      : `Sign-in didn't finish: ${back.error.replace(/\+/g, " ")}`);
+  } else if (back.code && !signedIn()) {
+    if (back.from === "reset") {
+      openAuth("forgot", "Open the reset link in the same browser where you asked for it. Or send a new link from here.");
+    } else if (back.from === "confirm") {
+      openAuth("signin", "Your email is confirmed. Sign in with your email and password to continue.");
+    } else {
+      openAuth("signin", "Please sign in to continue.");
+    }
+  }
+}
+
 // Startup: draw the page straight away, then fetch server settings and the signed-in user.
 (async () => {
+  const authReturn = readAuthReturn();
   // Coming back from Google sign-in: return to where the person was.
   try {
     const back = sessionStorage.getItem("ns:return");
@@ -1301,4 +1335,8 @@ async function restore(pid, version) {
   ui.booting = false;
   markReady();
   renderAccount();
+  if (authReturn.code || authReturn.error) {
+    tidyAuthAddress();
+    if (authReturn.type !== "recovery") explainAuthReturn(authReturn);
+  }
 })();
