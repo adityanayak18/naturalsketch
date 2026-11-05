@@ -154,6 +154,16 @@ def index() -> FileResponse:
     return FileResponse(WEB_DIR / "index.html")
 
 
+@app.get("/privacy.html")
+def privacy() -> FileResponse:
+    return FileResponse(WEB_DIR / "privacy.html")
+
+
+@app.get("/terms.html")
+def terms() -> FileResponse:
+    return FileResponse(WEB_DIR / "terms.html")
+
+
 @app.get("/api/status")
 def status() -> dict:
     return {**llm.status(), "preview_origin": PREVIEW_ORIGIN, "auth": auth.public_config()}

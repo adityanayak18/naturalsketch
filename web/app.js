@@ -550,6 +550,7 @@ async function renderHome() {
           <div>
             <div class="brand brand-sm"><span class="brand-mark"><i data-lucide="pen-tool"></i></span><span class="brand-name">Natural<em>Sketch</em></span></div>
             <p class="fine">Generated apps run on a separate origin, so code written by the AI can't reach the builder or its API.</p>
+            <p class="colophon-links"><a href="/privacy.html">Privacy Policy</a><a href="/terms.html">Terms of Service</a></p>
           </div>
           <div>
             <h4>Colophon · model chains</h4>
