@@ -272,8 +272,11 @@ function openAuth(mode = "signin", note = "") {
       } else if (mode === "signup") {
         const { data, error } = await a.signUp({ email, password, options: { emailRedirectTo: redirect + "?from=confirm" } });
         if (error) throw error;
-        if (data.session) await afterSignIn(data.session);
-        else say(`Almost there: we sent a confirmation link to ${email}. Open it to finish creating your account.`, "ok");
+        // Supabase doesn't reveal existing accounts: it answers with a user that has no identities.
+        if (data.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+          say("There's already an account with this email. Sign in instead, or use “Forgot password?”.");
+        } else if (data.session) await afterSignIn(data.session);
+        else say(`Almost there: we sent a confirmation link to ${email}. Open it in this browser to finish creating your account.`, "ok");
       } else if (mode === "forgot") {
         const { error } = await a.resetPasswordForEmail(email, { redirectTo: redirect + "?from=reset" });
         if (error) throw error;
