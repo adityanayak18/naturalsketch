@@ -15,13 +15,12 @@ services:
         value: 3.12.8
       - key: HOST
         value: 0.0.0.0
-      # The Vercel address of the frontend, e.g. https://naturalsketch.vercel.app
-      # (later https://naturalsketch.openarc.in)
+      # Where the frontend lives (Vercel, on the custom domain).
       - key: NS_APP_ORIGIN
-        sync: false
-      # This service's own address, e.g. https://naturalsketch-api.onrender.com
+        value: https://naturalsketch.openarc.in
+      # This service's own address; generated apps are previewed here.
       - key: NS_PREVIEW_ORIGIN
-        sync: false
+        value: https://naturalsketch-api.onrender.com
       # Required in this setup: the password for the studio.
       - key: NS_ACCESS_PASSWORD
         sync: false
