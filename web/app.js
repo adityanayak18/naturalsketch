@@ -388,11 +388,36 @@ const SCENE_START = { ...sceneState };
 
 // ------------------------------------------------------------------ routing
 
+// The page draws at once; anything that needs the server waits for this. On Render's free
+// plan the server sleeps when idle and can take up to a minute to wake.
+let markReady;
+ui.booting = true;
+ui.ready = new Promise((resolve) => (markReady = resolve));
+
+function wakingNote(host, text) {
+  // Only mention the wait if it's actually slow.
+  const timer = setTimeout(() => {
+    if (ui.booting && host.isConnected) {
+      host.innerHTML = `<div class="waking"><i data-lucide="loader-2" class="spin"></i><p>${text}</p><span>The server is waking up. On the free plan this can take up to a minute the first time.</span></div>`;
+      icons();
+    }
+  }, 1500);
+  ui.ready.then(() => clearTimeout(timer));
+}
+
 function route() {
   clearTimeout(ui.poll);
   closeMenus();
   teardownHome();
   const match = location.hash.match(/^#\/p\/([a-f0-9]+)/);
+  if (match && ui.booting) {
+    const hash = location.hash;
+    document.body.className = "mode-ws";
+    app.innerHTML = `<div class="fullpage-msg" id="opening"></div>`;
+    wakingNote($("#opening"), "Opening your app…");
+    ui.ready.then(() => location.hash === hash && route());
+    return;
+  }
   if (match && authState.enabled && !signedIn()) {
     renderHome();
     openAuth("signin", "Sign in to open this app.");
@@ -628,11 +653,8 @@ function initHomeMotion() {
 }
 
 async function loadStatus() {
-  try {
-    ui.status = await api("/api/status");
-  } catch (e) {
-    return;
-  }
+  await ui.ready; // the startup code fetches it once
+  if (!ui.status) return;
   const host = $("#providers");
   if (!host) return;
   host.innerHTML = Object.entries(ui.status.providers)
@@ -648,7 +670,13 @@ async function loadStatus() {
 }
 
 async function loadProjects() {
-  const host = $("#project-list");
+  let host = $("#project-list");
+  if (ui.booting) {
+    if (host) wakingNote(host, "Loading your apps…");
+    await ui.ready;
+    host = $("#project-list");
+    if (!host || !host.isConnected) return;
+  }
   if (host && authState.enabled && !signedIn()) {
     const count = $("#app-count");
     if (count) count.textContent = "";
@@ -782,6 +810,16 @@ function bindComposer() {
     if (!prompt && !ui.files.length) {
       flash("Add a sketch or describe your app first.");
       return;
+    }
+    if (ui.booting) {
+      const b = $("#build");
+      b.disabled = true;
+      b.innerHTML = `<i data-lucide="loader-2" class="spin"></i><span>Waking the server…</span>`;
+      icons();
+      await ui.ready;
+      b.disabled = false;
+      b.innerHTML = `<i data-lucide="sparkles"></i><span>Build app</span>`;
+      icons();
     }
     if (authState.enabled && !signedIn()) {
       ui.pendingBuild = true; // build straight after signing in; the brief stays as typed
@@ -1232,32 +1270,34 @@ async function restore(pid, version) {
   refresh(pid);
 }
 
-// Startup: server settings, then the signed-in user (if any), then the page.
+// Startup: draw the page straight away, then fetch server settings and the signed-in user.
 (async () => {
+  // Coming back from Google sign-in: return to where the person was.
+  try {
+    const back = sessionStorage.getItem("ns:return");
+    if (back != null) {
+      sessionStorage.removeItem("ns:return");
+      if (back && back !== location.hash) history.replaceState(null, "", location.pathname + location.search + back);
+    }
+  } catch (e) {
+    /* fine without */
+  }
+  route();
+
   let status = null;
   try {
     status = await api("/api/status");
     ui.status = status;
     if (status.preview_origin) PREVIEW = status.preview_origin;
   } catch (e) {
-    /* the page still renders */
+    /* the page still works; the server parts show their own errors */
   }
   try {
     await initAuth(status && status.auth);
   } catch (e) {
     flash(e.message);
   }
-  // Coming back from Google sign-in: return to where the person was.
-  try {
-    const back = sessionStorage.getItem("ns:return");
-    if (back != null) {
-      sessionStorage.removeItem("ns:return");
-      if (back && back !== location.hash) {
-        history.replaceState(null, "", location.pathname + back);
-      }
-    }
-  } catch (e) {
-    /* fine without */
-  }
-  route();
+  ui.booting = false;
+  markReady();
+  renderAccount();
 })();
