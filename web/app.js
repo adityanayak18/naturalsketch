@@ -126,6 +126,11 @@ async function refreshUsage() {
 
 function renderAccount() {
   $$(".account").forEach((host) => {
+    if (ui.serverDown) {
+      host.innerHTML = `<button type="button" class="btn btn-ghost sm" data-retry><i data-lucide="refresh-cw"></i>Retry</button>`;
+      host.querySelector("[data-retry]").addEventListener("click", () => location.reload());
+      return;
+    }
     if (!authState.enabled) {
       host.innerHTML = "";
       return;
@@ -680,6 +685,13 @@ async function loadProjects() {
     await ui.ready;
     host = $("#project-list");
     if (!host || !host.isConnected) return;
+  }
+  if (host && ui.serverDown) {
+    host.innerHTML = `<div class="empty"><i data-lucide="cloud-off"></i><p>The server isn't answering right now. It may still be starting up.</p>
+      <div class="empty-actions"><button type="button" class="btn btn-accent sm" data-retry>Try again</button></div></div>`;
+    host.querySelector("[data-retry]").addEventListener("click", () => location.reload());
+    icons();
+    return;
   }
   if (host && authState.enabled && !signedIn()) {
     const count = $("#app-count");
@@ -1322,18 +1334,26 @@ function explainAuthReturn(back) {
   }
   route();
 
+  // A sleeping free-plan server can take up to a minute to wake, and the Vercel proxy gives up
+  // sooner, so early requests may fail. Keep trying for about 90 s before calling it down.
   let status = null;
-  try {
-    status = await api("/api/status");
+  for (let attempt = 0; attempt < 9 && !status; attempt++) {
+    try {
+      status = await api("/api/status");
+    } catch (e) {
+      if (attempt < 8) await new Promise((r) => setTimeout(r, Math.min(15000, 3000 * (attempt + 1))));
+    }
+  }
+  if (status) {
     ui.status = status;
     if (status.preview_origin) PREVIEW = status.preview_origin;
-  } catch (e) {
-    /* the page still works; the server parts show their own errors */
-  }
-  try {
-    await initAuth(status && status.auth);
-  } catch (e) {
-    flash(e.message);
+    try {
+      await initAuth(status.auth); // auth: null only when the server really has accounts off
+    } catch (e) {
+      flash(e.message);
+    }
+  } else {
+    ui.serverDown = true;
   }
   ui.booting = false;
   markReady();
