@@ -644,6 +644,14 @@ def _build(pid: str):
             session.update(brief=brief)
             session.log(f"Design understood: {str(brief.get('summary', ''))[:220]}", "done", model)
 
+        if project.get("kind") == "react":
+            import react_builder  # imported here: it builds on this module
+
+            brief = json.dumps(project["brief"], ensure_ascii=False) if project["brief"] else "(no images)"
+            react_builder.build(session, brief, len(images))
+            session.update(status="ready")
+            return
+
         session.log("Planning pages, navigation, theme and data", "step")
         prompt = (
             f"USER'S DESCRIPTION: {project['prompt'] or '(see the image analysis)'}\n"
@@ -738,6 +746,16 @@ def _chat(pid: str, message: str):
 
     files = projects.read_version(pid, project["current"])
     plan = json.loads(files["_src/plan.json"])
+    if plan.get("kind") == "react":
+        import react_builder
+
+        try:
+            react_builder.chat(session, message, files)
+        except llm.LLMError:
+            session.log("Every AI provider failed for this change. Wait a minute and try again.", "error")
+            session.say("Sorry, all the AI providers are busy right now. Please send that again in a minute.")
+        session.update(status="ready")
+        return
     bodies = {page["slug"]: files.get(f"_src/pages/{page['slug']}.html", "") for page in plan["pages"]}
     try:
         session.log("Working out what to change", "step")

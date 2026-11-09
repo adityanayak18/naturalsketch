@@ -725,3 +725,34 @@ body.auth-open { overflow: hidden; }
 .legal b { color: var(--ink); font-weight: 600; }
 .legal a { color: var(--accent); text-underline-offset: 3px; }
 .legal-foot { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--rule); font-size: 13.5px; }
+
+/* ------------------------------------------------------------------ project types (React) */
+
+.kind-pick { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-bottom: 6px; }
+.kind {
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  padding: 12px 14px; border: 1.5px solid var(--rule); border-radius: 12px; background: var(--paper-hi);
+  transition: border-color 0.2s, background 0.2s, transform 0.25s var(--ease);
+}
+.kind b { font-family: var(--serif); font-size: 17px; font-weight: 500; color: var(--ink); }
+.kind span { font-size: 12.5px; color: var(--muted); }
+.kind:hover { border-color: var(--ink-2); transform: translateY(-1px); }
+.kind.on { border-color: var(--accent); background: #fbefe6; box-shadow: 0 0 0 3px rgba(180, 68, 28, 0.12); }
+.kind.on b { color: var(--accent); }
+@media (max-width: 520px) { .kind-pick { grid-template-columns: minmax(0, 1fr); } }
+
+.thumb-react {
+  width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  background: radial-gradient(120% 90% at 30% 20%, #3a2a22, #14110e 70%); color: #f1d9c8;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+}
+.thumb-react .lucide { width: 34px; height: 34px; color: #e2865f; }
+
+.code-view.files { height: 100%; }
+.code-body { flex: 1; min-height: 0; display: flex; }
+.file-list { width: 230px; flex-shrink: 0; overflow-y: auto; padding: 8px; border-right: 1px solid #2a3530; scrollbar-width: thin; scrollbar-color: #34413a transparent; }
+.file-list button { display: block; width: 100%; text-align: left; padding: 5px 8px; border-radius: 6px; font-family: var(--mono); font-size: 11.5px; color: #a9b8af; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-list button:hover { background: rgba(255, 255, 255, 0.05); color: #e8efe9; }
+.file-list button.on { background: rgba(226, 134, 95, 0.16); color: #ffd9c4; }
+.code-body pre { flex: 1; min-width: 0; }
+@media (max-width: 680px) { .code-body { flex-direction: column; } .file-list { width: auto; max-height: 140px; border-right: 0; border-bottom: 1px solid #2a3530; } }

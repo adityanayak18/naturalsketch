@@ -5,6 +5,17 @@ features you want, and get a **working multi-page prototype**. Then keep refinin
 
 Runs entirely on **free tiers** of Gemini, Groq and OpenRouter, with automatic fallback between them.
 
+## Two kinds of project
+
+- **Website prototype:** a multi-page HTML app on a small shared runtime (navigation, a persistent mock
+  database, cart and wishlist state, mock login, toasts). The fastest to build.
+- **React app:** a real Vite + React 18 + Tailwind CSS project with React Router, and when it suits the idea
+  three.js / React Three Fiber 3D scenes, Framer Motion and GSAP animation, and smooth scrolling. The AI plans
+  routes and components, writes the layout and components first and then the pages that use them, and every file
+  is checked (imports, conventions) before it is accepted. The preview bundles the project in the browser with
+  esbuild-wasm and loads libraries from esm.sh, and errors it reports are sent back to the AI to fix. The ZIP export
+  is a normal project: `npm install && npm run dev`.
+
 ## How it works
 
 1. **Analyse.** A vision model reads your images: layout, components, text and style. Paper sketches
@@ -67,6 +78,8 @@ AI can't access the builder or its API. The server only listens on this computer
 | --- | --- |
 | `server.py` | FastAPI server: API, preview hosting, ZIP export |
 | `builder.py` | Pipeline and prompts: analyse → plan → build pages, chat edits, versions |
+| `react_builder.py` | React projects: plan, file generation and checks, project scaffold, in-browser preview |
+| `auth.py` | Accounts via Supabase Auth (email and Google sign-in) |
 | `llm.py` | Gemini / Groq / OpenRouter client with fallback chains and cooldowns |
 | `projects.py` | Storage in Supabase Postgres (schema `naturalsketch`): projects, uploads, versions, files, chat, logs |
 | `migrate_local_data.py` | One-time import of projects from the old `data/` folder |

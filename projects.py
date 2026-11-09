@@ -87,6 +87,8 @@ create index if not exists logs_by_project on naturalsketch.logs (project_id, id
 -- Accounts: each project belongs to a Supabase Auth user (their id). Older projects have none
 -- until the admin account claims them.
 alter table naturalsketch.projects add column if not exists owner_id text;
+-- 'site' (multi-page HTML prototype) or 'react' (a Vite + React project).
+alter table naturalsketch.projects add column if not exists kind text not null default 'site';
 create index if not exists projects_by_owner on naturalsketch.projects (owner_id, updated_at desc);
 
 -- Builds and chat edits per user per day, so one account can't use up the shared AI quota.
@@ -173,13 +175,14 @@ def _check(pid: str) -> None:
 
 # ---------------------------------------------------------------- projects
 
-def create(prompt: str, features: list[str], images: list[tuple[bytes, str, str]], owner: str | None = None) -> str:
+def create(prompt: str, features: list[str], images: list[tuple[bytes, str, str]], owner: str | None = None,
+           kind: str = "site") -> str:
     """images: (data, mime, kind) where kind is 'sketch' or 'screenshot'. Returns the new id."""
     pid = secrets.token_hex(5)
     with pool().connection() as conn, conn.transaction():
         conn.execute(
-            "insert into naturalsketch.projects (id, prompt, features, owner_id) values (%s, %s, %s, %s)",
-            (pid, prompt, Jsonb(features), owner),
+            "insert into naturalsketch.projects (id, prompt, features, owner_id, kind) values (%s, %s, %s, %s, %s)",
+            (pid, prompt, Jsonb(features), owner, kind),
         )
         for index, (data, mime, kind) in enumerate(images):
             conn.execute(
@@ -194,7 +197,7 @@ def load(pid: str) -> dict:
     _check(pid)
     row = _one(
         """
-        select p.id, p.name, p.prompt, p.features, p.brief, p.status, p.error,
+        select p.id, p.name, p.prompt, p.features, p.brief, p.status, p.error, p.kind,
                p.current_version as current,
                extract(epoch from p.created_at)::float8 as created,
                extract(epoch from p.updated_at)::float8 as updated,
@@ -223,7 +226,7 @@ def list_all(owner: str | None = None) -> list[dict]:
     """The owner's projects, newest first. owner=None (local single-user mode) lists everything."""
     return _all(
         """
-        select p.id, p.name, p.status, p.current_version as current, left(p.prompt, 160) as prompt,
+        select p.id, p.name, p.status, p.kind, p.current_version as current, left(p.prompt, 160) as prompt,
                extract(epoch from p.updated_at)::float8 as updated,
                (select count(*) from naturalsketch.versions v where v.project_id = p.id)::int as versions,
                (select min(u.idx)::text from naturalsketch.uploads u where u.project_id = p.id) as thumbnail
@@ -327,13 +330,20 @@ def read_upload(pid: str, index: int) -> tuple[bytes, str] | None:
 
 # ---------------------------------------------------------------- versions and files
 
-def write_version(pid: str, files: dict[str, str], message: str) -> int:
-    """Store a full site snapshot as the next version and make it current."""
+def write_version(pid: str, files: dict[str, str], message: str, pages: list[str] | None = None) -> int:
+    """Store a full site snapshot as the next version and make it current.
+
+    `pages` are the page tabs the studio shows; HTML sites derive them from their .html files.
+    """
     _check(pid)
-    pages = sorted(name[:-5] for name in files if name.endswith(".html") and "/" not in name)
-    if "_src/plan.json" in files:  # keep the app's own page order (home first)
-        order = [page["slug"] for page in json.loads(files["_src/plan.json"])["pages"]]
-        pages = [slug for slug in order if slug in pages] + [slug for slug in pages if slug not in order]
+    if pages is None:
+        plan = json.loads(files["_src/plan.json"]) if "_src/plan.json" in files else {}
+        if plan.get("kind") == "react":  # page tabs are the routes you can open without an id
+            pages = [r["slug"] for r in plan.get("routes", []) if not r.get("param")] or ["index"]
+        else:
+            pages = sorted(name[:-5] for name in files if name.endswith(".html") and "/" not in name)
+            order = [page["slug"] for page in plan.get("pages", [])]  # keep the app's own order (home first)
+            pages = [slug for slug in order if slug in pages] + [slug for slug in pages if slug not in order]
 
     with pool().connection() as conn, conn.transaction():
         conn.execute("select 1 from naturalsketch.projects where id = %s for update", (pid,))  # serialise numbering

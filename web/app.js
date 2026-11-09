@@ -355,6 +355,16 @@ function flash(message, tone = "bad") {
 
 const TEMPLATES = [
   {
+    label: "3D portfolio", icon: "box", kind: "react",
+    prompt: "A portfolio for a creative developer and 3D artist, with an interactive 3D hero scene, smooth scroll animations and a bold, editorial feel.",
+    features: "Interactive 3D hero that reacts to the mouse\nSelected work grid with hover effects\nProject detail page with images and a write-up\nAbout section with skills and experience timeline\nContact form with validation",
+  },
+  {
+    label: "Product launch", icon: "rocket", kind: "react",
+    prompt: "A launch website for a premium pair of wireless headphones, with a rotating 3D product, scroll-driven storytelling and pre-order.",
+    features: "3D product that rotates as you scroll\nFeature highlights revealed with scroll animations\nTech specs comparison\nCustomer testimonials carousel\nPre-order form with colour selection",
+  },
+  {
     label: "Online store", icon: "shopping-bag",
     prompt: "A modern online store for handmade ceramics: mugs, bowls and vases from small studios.",
     features: "Product catalogue with search and category filters\nProduct detail page with reviews\nShopping cart with quantity changes and live totals\nCheckout form with order confirmation\nCustomer account with order history",
@@ -377,6 +387,11 @@ const TEMPLATES = [
 ];
 
 const SUGGESTIONS = ["Switch to a dark theme", "Add a settings page", "Make the home page more visual", "Add a search bar to every list"];
+const REACT_SUGGESTIONS = ["Add a 3D scene to the hero", "Add scroll animations", "Add a contact page", "Switch to a dark theme"];
+const KINDS = {
+  site: { label: "Website prototype", note: "Multi-page HTML, fastest to build" },
+  react: { label: "React app", note: "React + 3D + motion, real project ZIP" },
+};
 
 const STEPS = [
   { title: "Analyse", tag: "vision model · opencv", text: "A vision model reads your images: layout, components, text and style. Paper sketches are cleaned up with OpenCV first, lifting shadows and sharpening the lines, so nothing you drew is missed." },
@@ -388,7 +403,61 @@ const STEPS = [
 
 const CHAIN_LABELS = { VISION: "Image analysis", PLAN: "Planning", CODE: "Page code", CHAT: "Chat edits" };
 
-const ui = { files: [], status: null, project: null, page: "index", viewVersion: null, device: "desktop", showCode: false, poll: null, error: null, loadedSrc: null };
+const ui = { files: [], status: null, project: null, page: "index", viewVersion: null, device: "desktop", showCode: false, poll: null, error: null, loadedSrc: null, kind: "site" };
+
+function setKind(kind) {
+  ui.kind = KINDS[kind] ? kind : "site";
+  $$("[data-kind]").forEach((b) => {
+    b.classList.toggle("on", b.dataset.kind === ui.kind);
+    b.setAttribute("aria-checked", String(b.dataset.kind === ui.kind));
+  });
+}
+
+const isReact = () => Boolean(ui.project && ui.project.kind === "react");
+
+// Where the current page of the viewed version is previewed. React projects are one app with
+// routes after the #; HTML sites have a file per page.
+function previewSrc(page = ui.page) {
+  const base = `${PREVIEW}/preview/${ui.project.id}/${ui.viewVersion}`;
+  return isReact() ? `${base}/index.html#/${page === "index" ? "" : page}` : `${base}/${page}.html`;
+}
+
+// The code view for React projects: every file of the version, with a file list.
+function renderFileBrowser() {
+  const p = ui.project;
+  const key = `files:${p.id}:${ui.viewVersion}`;
+  if (ui.loadedSrc === key) return;
+  ui.loadedSrc = key;
+  const stage = $("#stage");
+  stage.innerHTML = `
+    <div class="code-view files">
+      <div class="code-head"><span id="file-name">Loading files…</span><button id="copy" class="btn btn-ghost sm dark">Copy</button></div>
+      <div class="code-body"><nav class="file-list" id="file-list" aria-label="Project files"></nav><pre><code id="source"></code></pre></div>
+    </div>`;
+  fetch(`${PREVIEW}/preview/${p.id}/${ui.viewVersion}/__files.json`)
+    .then((r) => r.json())
+    .then((files) => {
+      if (ui.loadedSrc !== key) return;
+      const paths = Object.keys(files).sort((a, b) => {
+        const depth = (s) => (s.startsWith("src/") ? 0 : 1);
+        return depth(a) - depth(b) || a.localeCompare(b);
+      });
+      const list = $("#file-list");
+      list.innerHTML = paths.map((path) => `<button type="button" data-file="${esc(path)}">${esc(path)}</button>`).join("");
+      const show = (path) => {
+        $("#file-name").textContent = `${path} · v${ui.viewVersion} · ${paths.length} files`;
+        $("#source").textContent = files[path];
+        list.querySelectorAll("[data-file]").forEach((b) => b.classList.toggle("on", b.dataset.file === path));
+        $("#copy").textContent = "Copy";
+        $("#copy").onclick = () => navigator.clipboard.writeText(files[path]).then(() => ($("#copy").textContent = "Copied"));
+      };
+      list.querySelectorAll("[data-file]").forEach((b) => b.addEventListener("click", () => show(b.dataset.file)));
+      show(paths.find((x) => x === "src/App.jsx") || paths[0]);
+    })
+    .catch((e) => {
+      $("#file-name").textContent = `Couldn't load the files: ${e.message}`;
+    });
+}
 
 // Shared with scene3d.js; GSAP tweens these numbers as you scroll.
 const sceneState = { x: 2.55, y: 0, scale: 1, rotX: 0.18, rotY: -0.42, spread: 0, fan: 0, active: 0, morph: 0, pencil: 0, fade: 1 };
@@ -492,6 +561,10 @@ async function renderHome() {
               ${TEMPLATES.map((t, i) => `<button type="button" class="tab" data-template="${i}"><i data-lucide="${t.icon}"></i>${t.label}</button>`).join("")}
             </div>
             <div class="composer-body">
+              <div class="field-label"><span>Fig. 0</span>What are we making?</div>
+              <div class="kind-pick" role="radiogroup" aria-label="Project type">
+                ${Object.entries(KINDS).map(([k, v]) => `<button type="button" role="radio" data-kind="${k}" class="kind ${k === ui.kind ? "on" : ""}" aria-checked="${k === ui.kind}"><b>${v.label}</b><span>${v.note}</span></button>`).join("")}
+              </div>
               <div class="field-label"><span>Fig. 1</span>Sketches &amp; screenshots</div>
               <label id="dropzone" class="dropzone">
                 <span class="dz-icon"><i data-lucide="image-plus"></i></span>
@@ -721,7 +794,9 @@ async function loadProjects() {
   }
   host.innerHTML = list
     .map((p, i) => {
-      const thumb = p.current
+      const thumb = p.kind === "react" && p.current
+        ? `<div class="thumb-react"><i data-lucide="box"></i><span>React project</span></div>`
+        : p.current
         ? `<iframe src="${PREVIEW}/preview/${p.id}/${p.current}/index.html" tabindex="-1" loading="lazy" title="" aria-hidden="true"></iframe>`
         : p.thumbnail
           ? `<img src="/api/projects/${p.id}/uploads/${p.thumbnail}" alt="" class="sketch-thumb">`
@@ -811,11 +886,13 @@ function bindComposer() {
     addFiles(e.dataTransfer.files);
   });
 
+  $$("[data-kind]").forEach((button) => button.addEventListener("click", () => setKind(button.dataset.kind)));
   $$("[data-template]").forEach((button) =>
     button.addEventListener("click", () => {
       const t = TEMPLATES[button.dataset.template];
       $("#prompt").value = t.prompt;
       $("#features").value = t.features;
+      setKind(t.kind || "site");
       $$("[data-template]").forEach((b) => b.classList.toggle("on", b === button));
     }),
   );
@@ -850,6 +927,7 @@ function bindComposer() {
       const form = new FormData();
       form.append("prompt", prompt);
       form.append("features", $("#features").value);
+      form.append("kind", ui.kind);
       for (const { file } of ui.files) form.append("images", await shrinkImage(file));
       const { id } = await api("/api/projects", { method: "POST", body: form });
       ui.files = [];
@@ -1064,7 +1142,7 @@ function renderHeader() {
   const download = $("#download");
   download.href = ready ? `/api/projects/${p.id}/download?version=${ui.viewVersion}` : "#";
   download.classList.toggle("disabled", !ready);
-  $("#open-tab").href = ready ? `${PREVIEW}/preview/${p.id}/${ui.viewVersion}/${ui.page}.html` : "#";
+  $("#open-tab").href = ready ? previewSrc() : "#";
   $("#open-tab").classList.toggle("disabled", !ready);
   $("#send").disabled = busy();
   icons();
@@ -1112,7 +1190,7 @@ function renderTimeline() {
 
   const suggestions = $("#suggestions");
   suggestions.innerHTML = p.current && !busy()
-    ? SUGGESTIONS.map((s) => `<button type="button" class="chip">${esc(s)}</button>`).join("")
+    ? (isReact() ? REACT_SUGGESTIONS : SUGGESTIONS).map((s) => `<button type="button" class="chip">${esc(s)}</button>`).join("")
     : "";
   suggestions.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => sendMessage(p.id, b.textContent)));
 }
@@ -1126,7 +1204,7 @@ function renderToolbar() {
   $("#pages").querySelectorAll("[data-page]").forEach((b) =>
     b.addEventListener("click", () => {
       ui.page = b.dataset.page;
-      ui.loadedSrc = null;
+      if (!isReact()) ui.loadedSrc = null; // React: same app, just another route
       renderToolbar();
       renderStage();
       renderHeader();
@@ -1134,7 +1212,7 @@ function renderToolbar() {
   );
   $$("[data-device]").forEach((b) => b.classList.toggle("on", b.dataset.device === ui.device && !ui.showCode));
   $("#code").classList.toggle("on", ui.showCode);
-  if (p) $("#open-tab").href = ui.viewVersion ? `${PREVIEW}/preview/${p.id}/${ui.viewVersion}/${ui.page}.html` : "#";
+  if (p) $("#open-tab").href = ui.viewVersion ? previewSrc() : "#";
 }
 
 const DRAWING = `
@@ -1173,7 +1251,11 @@ function renderStage() {
     return;
   }
 
-  const src = `${PREVIEW}/preview/${p.id}/${ui.viewVersion}/${ui.page}.html`;
+  const src = previewSrc();
+  if (ui.showCode && isReact()) {
+    renderFileBrowser();
+    return;
+  }
   if (ui.showCode) {
     if (ui.loadedSrc === "code:" + src) return;
     ui.loadedSrc = "code:" + src;
@@ -1195,10 +1277,14 @@ function renderStage() {
 
   const width = { desktop: "100%", tablet: "820px", mobile: "390px" }[ui.device];
   const existing = $("#preview");
-  if (existing && ui.loadedSrc === src) {
+  if (existing && (ui.loadedSrc === src || (isReact() && ui.loadedSrc && ui.loadedSrc.split("#")[0] === src.split("#")[0]))) {
     const frame = existing.closest(".device-frame");
     frame.style.width = width;
     frame.dataset.device = ui.device;
+    if (ui.loadedSrc !== src) {
+      existing.src = src; // React: same app, another route (a fragment change, no reload)
+      ui.loadedSrc = src;
+    }
     return;
   }
   ui.loadedSrc = src;
@@ -1242,7 +1328,7 @@ window.addEventListener("message", (event) => {
   if (!frame || event.source !== frame.contentWindow || !event.data || event.data.source !== "naturalsketch") return;
   if (event.data.type === "page" && event.data.page !== ui.page) {
     ui.page = event.data.page;
-    ui.loadedSrc = `${PREVIEW}/preview/${ui.project.id}/${ui.viewVersion}/${ui.page}.html`;
+    ui.loadedSrc = previewSrc();
     ui.error = null;
     renderToolbar();
     renderErrorBanner();
@@ -1250,19 +1336,35 @@ window.addEventListener("message", (event) => {
   if (event.data.type === "error" && !busy()) {
     ui.error = { page: event.data.page, message: event.data.message };
     renderErrorBanner();
+    autoFix(ui.error);
   }
 });
 
-async function sendMessage(pid, text) {
+// React projects: when the preview reports an error, ask the AI to fix it straight away (at most
+// twice per version, and only on the current version; the server enforces the same limit).
+function autoFix(error) {
+  const p = ui.project;
+  if (!isReact() || !p || ui.viewVersion !== p.current || busy()) return;
+  ui.autoFixes = ui.autoFixes || {};
+  const key = `${p.id}:${p.current}`;
+  if ((ui.autoFixes[key] || 0) >= 2) return;
+  ui.autoFixes[key] = (ui.autoFixes[key] || 0) + 1;
+  ui.error = null;
+  renderErrorBanner();
+  flash("The preview hit an error. Fixing it automatically…", "ok");
+  sendMessage(p.id, `Fix this error in the preview (${error.page} page): ${error.message}`, { auto: true });
+}
+
+async function sendMessage(pid, text, options = {}) {
   text = text.trim();
   if (!text || busy()) return;
-  $("#message").value = "";
+  if (!options.auto) $("#message").value = "";
   try {
-    await api(`/api/projects/${pid}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text }) });
-    refreshUsage();
+    await api(`/api/projects/${pid}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, auto: Boolean(options.auto) }) });
+    if (!options.auto) refreshUsage();
   } catch (e) {
     flash(e.message);
-    if ($("#message") && !$("#message").value) $("#message").value = text; // don't lose what they typed
+    if (!options.auto && $("#message") && !$("#message").value) $("#message").value = text; // don't lose what they typed
   }
   refresh(pid);
 }
