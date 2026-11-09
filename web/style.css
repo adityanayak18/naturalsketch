@@ -756,3 +756,6 @@ body.auth-open { overflow: hidden; }
 .file-list button.on { background: rgba(226, 134, 95, 0.16); color: #ffd9c4; }
 .code-body pre { flex: 1; min-width: 0; }
 @media (max-width: 680px) { .code-body { flex-direction: column; } .file-list { width: auto; max-height: 140px; border-right: 0; border-bottom: 1px solid #2a3530; } }
+
+.account-wait { display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border: 1px dashed var(--rule); border-radius: 99px; font-size: 12.5px; color: var(--muted); }
+.account-wait .lucide { width: 14px; height: 14px; color: var(--accent); }

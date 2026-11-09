@@ -126,6 +126,10 @@ async function refreshUsage() {
 
 function renderAccount() {
   $$(".account").forEach((host) => {
+    if (ui.booting) {  // the server may be waking up: say so instead of showing nothing
+      host.innerHTML = `<span class="account-wait"><i data-lucide="loader-2" class="spin"></i>Connecting…</span>`;
+      return;
+    }
     if (ui.serverDown) {
       host.innerHTML = `<button type="button" class="btn btn-ghost sm" data-retry><i data-lucide="refresh-cw"></i>Retry</button>`;
       host.querySelector("[data-retry]").addEventListener("click", () => location.reload());
@@ -1439,11 +1443,13 @@ function explainAuthReturn(back) {
   // A sleeping free-plan server can take up to a minute to wake, and the Vercel proxy gives up
   // sooner, so early requests may fail. Keep trying for about 90 s before calling it down.
   let status = null;
-  for (let attempt = 0; attempt < 9 && !status; attempt++) {
+  // Retry every 3 s for about 90 s, so the page continues as soon as the server is awake.
+  const giveUpAt = Date.now() + 90000;
+  while (!status && Date.now() < giveUpAt) {
     try {
       status = await api("/api/status");
     } catch (e) {
-      if (attempt < 8) await new Promise((r) => setTimeout(r, Math.min(15000, 3000 * (attempt + 1))));
+      await new Promise((r) => setTimeout(r, 3000));
     }
   }
   if (status) {
