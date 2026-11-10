@@ -5,7 +5,7 @@ features you want, and get a **working multi-page prototype**. Then keep refinin
 
 Runs entirely on **free tiers** of Gemini, Groq and OpenRouter, with automatic fallback between them.
 
-## Two kinds of project
+## Three kinds of project
 
 - **Website prototype:** a multi-page HTML app on a small shared runtime (navigation, a persistent mock
   database, cart and wishlist state, mock login, toasts). The fastest to build.
@@ -15,6 +15,19 @@ Runs entirely on **free tiers** of Gemini, Groq and OpenRouter, with automatic f
   is checked (imports, conventions) before it is accepted. The preview bundles the project in the browser with
   esbuild-wasm and loads libraries from esm.sh, and errors it reports are sent back to the AI to fix. The ZIP export
   is a normal project: `npm install && npm run dev`.
+
+- **Full-stack app:** the React app above plus a backend in **Python (FastAPI)**, **Node.js (Express)** or
+  **Java** (the JDK's built-in HTTP server, no dependencies). The AI plans the data model; each collection becomes
+  a REST resource with validation, and the backend adds sign-in (hashed passwords, signed tokens), seed data and
+  persistence. The frontend's data layer loads and saves through the API; in the studio preview it runs on the
+  sample data instead. The ZIP has `frontend/` and `backend/` side by side, with a README, Dockerfile and
+  docker-compose file. All three backends are checked against the same API test suite.
+
+Any build can also take **reference websites**: up to three links whose structure, colours and fonts are read on
+the server (public pages only) and given to the planner as inspiration.
+
+People can add **their own AI key** (Gemini, Groq or OpenRouter with any model). It is validated, stored encrypted,
+and used first in their builds, with the shared free models as the fallback.
 
 ## How it works
 
@@ -80,6 +93,9 @@ AI can't access the builder or its API. The server only listens on this computer
 | `builder.py` | Pipeline and prompts: analyse → plan → build pages, chat edits, versions |
 | `react_builder.py` | React projects: plan, file generation and checks, project scaffold, in-browser preview |
 | `auth.py` | Accounts via Supabase Auth (email and Google sign-in) |
+| `backends.py` | Full-stack projects: the Python, Node and Java backends and the frontend's API data layer |
+| `refsite.py` | Reference websites: safe fetching and a summary of structure, colours and fonts |
+| `userkeys.py` | Users' own AI keys, encrypted at rest |
 | `llm.py` | Gemini / Groq / OpenRouter client with fallback chains and cooldowns |
 | `projects.py` | Storage in Supabase Postgres (schema `naturalsketch`): projects, uploads, versions, files, chat, logs |
 | `migrate_local_data.py` | One-time import of projects from the old `data/` folder |

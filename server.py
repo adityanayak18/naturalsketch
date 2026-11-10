@@ -30,7 +30,10 @@ import auth  # noqa: E402  (these need the environment loaded first)
 import builder  # noqa: E402
 import llm  # noqa: E402
 import projects  # noqa: E402
+import backends  # noqa: E402
 import react_builder  # noqa: E402
+import refsite  # noqa: E402
+import userkeys  # noqa: E402
 import vision_processor  # noqa: E402
 
 mimetypes.add_type("text/javascript", ".js")  # Windows may map .js to text/plain
@@ -129,19 +132,27 @@ def _busy(pid: str) -> None:
         raise HTTPException(409, "This project is still building. Wait for it to finish.")
 
 
+OWN_KEY_BONUS = 5  # accounts using their own AI key get this many times the daily allowance
+
+
+def _limit(user: dict) -> int | None:
+    """Builds and edits allowed today, or None for unlimited."""
+    if user["id"] is None or user["admin"] or auth.DAILY_LIMIT <= 0:
+        return None
+    return auth.DAILY_LIMIT * (OWN_KEY_BONUS if projects.get_user_key(user["id"]) else 1)
+
+
 def _spend(user: dict) -> None:
     """Count a build or chat edit against the account's daily allowance."""
-    if user["id"] is None or user["admin"] or auth.DAILY_LIMIT <= 0:
-        return
-    if not projects.take_action(user["id"], auth.DAILY_LIMIT):
+    limit = _limit(user)
+    if limit is not None and not projects.take_action(user["id"], limit):
         raise HTTPException(
-            429, f"You've used all {auth.DAILY_LIMIT} builds and edits for today. Your allowance resets at midnight UTC.",
+            429, f"You've used all {limit} builds and edits for today. Your allowance resets at midnight UTC.",
         )
 
 
 def _usage(user: dict) -> dict:
-    unlimited = user["id"] is None or user["admin"] or auth.DAILY_LIMIT <= 0
-    return {"used": 0 if user["id"] is None else projects.actions_today(user["id"]), "limit": None if unlimited else auth.DAILY_LIMIT}
+    return {"used": 0 if user["id"] is None else projects.actions_today(user["id"]), "limit": _limit(user)}
 
 
 def _public(user: dict) -> dict:
@@ -170,7 +181,10 @@ def terms() -> FileResponse:
 
 @app.get("/api/status")
 def status() -> dict:
-    return {**llm.status(), "preview_origin": PREVIEW_ORIGIN, "auth": auth.public_config()}
+    return {
+        **llm.status(), "preview_origin": PREVIEW_ORIGIN, "auth": auth.public_config(),
+        "kinds": ["site", "react", "fullstack"], "backends": list(backends.LANGUAGES),
+    }
 
 
 # ------------------------------------------------------------------ accounts
@@ -191,7 +205,7 @@ def start_session(body: Session) -> Response:
         claimed = projects.claim_unowned(user["id"])
         if claimed:
             logging.info("Gave %d existing projects to %s", claimed, user["email"])
-    response = JSONResponse({"user": _public(user), "usage": _usage(user)})
+    response = JSONResponse({"user": _public(user), "usage": _usage(user), "key": userkeys.info(user["id"])})
     response.set_cookie(
         SESSION_COOKIE, body.access_token, max_age=max(60, user["exp"] - int(time.time())),
         httponly=True, samesite="lax", secure=APP_ORIGIN.startswith("https://"), path="/",
@@ -209,7 +223,42 @@ def end_session() -> Response:
 @app.get("/api/me")
 def me(request: Request) -> dict:
     user = _user(request)
-    return {"user": _public(user), "usage": _usage(user)}
+    return {"user": _public(user), "usage": _usage(user), "key": userkeys.info(user["id"])}
+
+
+class OwnKey(BaseModel):
+    provider: str
+    key: str
+    model: str = ""
+
+
+@app.put("/api/key")
+def save_key(body: OwnKey, request: Request) -> dict:
+    """Store the user's own AI provider key (encrypted) after checking that it works."""
+    user = _user(request)
+    if user["id"] is None:
+        raise HTTPException(400, "In local mode the keys come from the .env file.")
+    key = body.key.strip()
+    if body.provider not in userkeys.PROVIDERS:
+        raise HTTPException(400, "Choose Gemini, Groq or OpenRouter.")
+    if not 10 <= len(key) <= 300 or any(c.isspace() for c in key):
+        raise HTTPException(400, "That doesn't look like an API key.")
+    own = {"provider": body.provider, "model": body.model.strip(), "key": key}
+    model = llm.own_model_for(own)
+    try:
+        llm.check_own_key(own)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+    userkeys.save(user["id"], body.provider, model.name, key)
+    return {"key": userkeys.info(user["id"]), "usage": _usage(user)}
+
+
+@app.delete("/api/key")
+def delete_key(request: Request) -> dict:
+    user = _user(request)
+    if user["id"] is not None:
+        projects.delete_user_key(user["id"])
+    return {"key": None, "usage": _usage(user)}
 
 
 # ------------------------------------------------------------------ projects
@@ -225,15 +274,19 @@ async def create_project(
     prompt: str = Form(""),
     features: str = Form(""),
     kind: str = Form("site"),
+    backend: str = Form(""),
+    references: str = Form(""),
     images: list[UploadFile] = File(default=[]),
 ) -> dict:
     user = _user(request)
-    kind = kind if kind in ("site", "react") else "site"
+    kind = kind if kind in ("site", "react", "fullstack") else "site"
+    backend_language = (backend if backend in backends.LANGUAGES else "python") if kind == "fullstack" else None
+    refs = [{"url": url} for url in refsite.parse_urls(references)]
     prompt = prompt.strip()[:4000]
     feature_list = [line.strip(" -•*\t") for line in features.splitlines() if line.strip(" -•*\t")][:40]
     images = [image for image in images if image.filename]
-    if not prompt and not images:
-        raise HTTPException(400, "Add a sketch or describe your app.")
+    if not prompt and not images and not refs:
+        raise HTTPException(400, "Add a sketch, a reference site or a description of your app.")
     if len(images) > MAX_IMAGES:
         raise HTTPException(400, f"Upload at most {MAX_IMAGES} images.")
 
@@ -250,7 +303,7 @@ async def create_project(
         stored.append((data, "image/jpeg", kind))
 
     await run_in_threadpool(_spend, user)
-    pid = projects.create(prompt, feature_list, stored, owner=user["id"], kind=kind)
+    pid = projects.create(prompt, feature_list, stored, owner=user["id"], kind=kind, backend=backend_language, refs=refs)
     builder.start_build(pid)
     return {"id": pid}
 
@@ -259,6 +312,10 @@ async def create_project(
 def get_project(pid: str, request: Request) -> dict:
     project = _project(pid, _user(request))
     project["running"] = builder.is_running(pid)
+    project.pop("owner", None)
+    for ref in project.get("refs") or []:  # the studio only needs to know what was read
+        if "summary" in ref:
+            ref["summary"] = {k: ref["summary"][k] for k in ("url", "title", "colours", "fonts")}
     return project
 
 
@@ -348,12 +405,17 @@ def download(pid: str, request: Request, version: int | None = None) -> Response
     files = projects.read_version(pid, version)
     slug = builder._slug(project["name"])
     buffer = io.BytesIO()
-    is_react = json.loads(files["_src/plan.json"]).get("kind") == "react"
+    plan = json.loads(files["_src/plan.json"])
+    is_react = plan.get("kind") == "react"
+    full_stack = bool(plan.get("backend"))
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         for path, content in files.items():
-            if not path.startswith("_src/"):
-                # React projects unzip into their own folder, ready for `npm install`.
-                archive.writestr(f"{slug}/{path}" if is_react else path, content)
+            if path.startswith("_src/"):
+                continue
+            if full_stack and not path.startswith("backend/") and path not in ("README.md", "docker-compose.yml"):
+                path = f"frontend/{path}"  # full-stack: frontend/ and backend/ side by side
+            # React projects unzip into their own folder, ready for `npm install`.
+            archive.writestr(f"{slug}/{path}" if is_react else path, content)
         if not is_react:  # React projects carry their own README.md
             archive.writestr("README.txt", (
                 f"{project['name']}: generated by NaturalSketch (version {version}).\n\n"

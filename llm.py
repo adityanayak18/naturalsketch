@@ -137,7 +137,8 @@ def _data_url(image: tuple[bytes, str]) -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
 
-def _call(model: Model, system: str, prompt: str, images, json_mode: bool, max_tokens: int, timeout: float):
+def _call(model: Model, system: str, prompt: str, images, json_mode: bool, max_tokens: int, timeout: float,
+          api_key: str | None = None):
     provider = PROVIDERS[model.provider]
     if images and model.vision:
         content = [{"type": "text", "text": prompt}] + [
@@ -160,7 +161,7 @@ def _call(model: Model, system: str, prompt: str, images, json_mode: bool, max_t
 
     response = httpx.post(
         f"{provider.base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {provider.api_key}", **provider.headers},
+        headers={"Authorization": f"Bearer {api_key or provider.api_key}", **provider.headers},
         json=body,
         timeout=timeout,
     )
@@ -199,6 +200,7 @@ def complete(
     max_tokens: int = 8000,
     validate: Callable[[str], object] | None = None,
     on_fallback: Callable[[str, str], None] | None = None,
+    own: dict | None = None,
 ):
     """Run a task through its model chain. Returns (result, "provider:model").
 
@@ -206,7 +208,8 @@ def complete(
     moves on to the next model. `on_fallback(failed_label, reason)` reports switches.
     """
     chain = [model for model in chain_for(task) if PROVIDERS[model.provider].api_key]
-    if not chain:
+    own_model = own_model_for(own) if own else None
+    if not chain and not own_model:
         raise LLMError("No AI provider is configured. Add API keys to .env.")
     if images:  # models that can see the images go first
         chain = [m for m in chain if m.vision] + [m for m in chain if not m.vision]
@@ -214,6 +217,16 @@ def complete(
     chain = [m for m in chain if not _on_cooldown(m)] + [m for m in chain if _on_cooldown(m)]
 
     errors = []
+    if own_model:  # the user's own key and model go first; the shared chain is the fallback
+        try:
+            text, used = _call(own_model, system, prompt, images, json_mode, max_tokens, TIMEOUTS[task], own["key"])
+            result = validate(text) if validate else text
+            return result, f"your key · {own_model.provider}:{used}"
+        except Exception as error:
+            reason = _describe(error)
+            errors.append(f"your key ({own_model.label}): {reason}")
+            if on_fallback:
+                on_fallback(f"your key ({own_model.label})", reason)
     for model in chain:
         try:
             text, used = _call(model, system, prompt, images, json_mode, max_tokens, TIMEOUTS[task])
@@ -231,6 +244,39 @@ def complete(
             if on_fallback:
                 on_fallback(model.label, reason)
     raise LLMError("All AI providers failed: " + "; ".join(errors))
+
+
+OWN_DEFAULTS = {"gemini": "gemini-3.5-flash", "groq": "openai/gpt-oss-120b", "openrouter": "openrouter/auto"}
+
+
+def own_model_for(own: dict) -> Model | None:
+    """The Model for a user's own key: {"provider", "model", "key"}."""
+    provider = own.get("provider")
+    if provider not in PROVIDERS or not own.get("key"):
+        return None
+    name = re.sub(r"[^A-Za-z0-9._:/@-]", "", str(own.get("model") or ""))[:100] or OWN_DEFAULTS[provider]
+    return Model(provider, name, vision=provider != "groq", max_output=6000 if provider == "groq" else 32000)
+
+
+def check_own_key(own: dict) -> None:
+    """One tiny request with the user's key. Raises ValueError with a readable reason if it fails."""
+    model = own_model_for(own)
+    if not model:
+        raise ValueError("Choose a provider and paste a key.")
+    try:
+        _call(model, "Reply with the single word: ok", "ok", None, False, 2000, 40, own["key"])
+    except ProviderError as error:
+        if error.status in (401, 403):
+            raise ValueError("That key was rejected by the provider. Check it and try again.") from None
+        if error.status == 404 or "model" in str(error).lower():
+            raise ValueError(f"The provider doesn't know the model \"{model.name}\". Check the model name.") from None
+        if error.status == 429:
+            return  # the key works; it is just rate limited right now
+        if str(error) in ("output was cut off", "empty response"):
+            return
+        raise ValueError(f"The provider answered: {str(error)[:200]}") from None
+    except httpx.HTTPError:
+        raise ValueError("Couldn't reach the provider. Try again in a moment.") from None
 
 
 def parse_json(text: str) -> dict:

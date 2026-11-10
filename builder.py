@@ -14,6 +14,8 @@ from pathlib import Path
 
 import llm
 import projects
+import refsite
+import userkeys
 import vision_processor
 
 logger = logging.getLogger("naturalsketch.builder")
@@ -575,6 +577,8 @@ class _Session:
     def __init__(self, pid: str):
         self.pid = pid
         self.project = projects.load(pid)
+        # The owner's own AI key, if they added one: tried first in every step of this job.
+        self.own = userkeys.load(self.project.get("owner"))
 
     def update(self, **fields):
         projects.update(self.pid, **fields)
@@ -608,7 +612,7 @@ def _generate_pages(session: _Session, plan: dict, jobs: list[tuple[dict, str | 
         try:
             body, model = llm.complete(
                 "code", EDIT_SYSTEM if current else PAGE_SYSTEM, prompt, images=images, max_tokens=16000,
-                validate=lambda text: clean_body(text, page["shell"]), on_fallback=session.fallback(page["title"]),
+                validate=lambda text: clean_body(text, page["shell"]), own=session.own, on_fallback=session.fallback(page["title"]),
             )
             session.log(f"{page['title']} ready", "done", model)
             return body
@@ -629,6 +633,24 @@ def _build(pid: str):
     project = session.project
     session.update(status="building", error=None)
     try:
+        refs = project.get("refs") or []
+        if any("summary" not in ref and "error" not in ref for ref in refs):
+            session.log(f"Reading {len(refs)} reference site{'s' if len(refs) > 1 else ''}", "step")
+            for ref in refs:
+                if "summary" in ref or "error" in ref:
+                    continue
+                try:
+                    ref["summary"] = refsite.summarise(ref["url"])
+                    found = ref["summary"]
+                    session.log(
+                        f"Read {found['url']}: {len(found['headings'])} headings, "
+                        f"{len(found['colours'])} colours, fonts: {', '.join(found['fonts']) or 'not found'}", "done",
+                    )
+                except ValueError as error:
+                    ref["error"] = str(error)
+                    session.log(f"Couldn't read {ref['url']}: {error}. Continuing without it.", "warn")
+            session.update(refs=refs)
+
         images = list(range(len(project["images"])))
         if images:
             session.log(f"Analysing {len(images)} image{'s' if len(images) > 1 else ''}", "step")
@@ -639,12 +661,12 @@ def _build(pid: str):
             )
             brief, model = llm.complete(
                 "vision", ANALYSE_SYSTEM, prompt, images=attachments, json_mode=True, max_tokens=8000,
-                validate=llm.parse_json, on_fallback=session.fallback("Image analysis"),
+                validate=llm.parse_json, own=session.own, on_fallback=session.fallback("Image analysis"),
             )
             session.update(brief=brief)
             session.log(f"Design understood: {str(brief.get('summary', ''))[:220]}", "done", model)
 
-        if project.get("kind") == "react":
+        if project.get("kind") in ("react", "fullstack"):
             import react_builder  # imported here: it builds on this module
 
             brief = json.dumps(project["brief"], ensure_ascii=False) if project["brief"] else "(no images)"
@@ -657,12 +679,13 @@ def _build(pid: str):
             f"USER'S DESCRIPTION: {project['prompt'] or '(see the image analysis)'}\n"
             f"REQUIRED FEATURES:\n{_features_text(project)}\n"
             f"UPLOADED IMAGES: {len(images)}\n"
-            f"IMAGE ANALYSIS: {json.dumps(project['brief'], ensure_ascii=False) if project['brief'] else '(no images)'}"
+            f"IMAGE ANALYSIS: {json.dumps(project['brief'], ensure_ascii=False) if project['brief'] else '(no images)'}\n"
+            f"REFERENCE SITES:\n{refsite.describe(project.get('refs'))}"
         )
         plan, model = llm.complete(
             "plan", PLAN_SYSTEM, prompt, json_mode=True, max_tokens=12000,
             validate=lambda text: normalize_plan(llm.parse_json(text), len(images)),
-            on_fallback=session.fallback("Planning"),
+            own=session.own, on_fallback=session.fallback("Planning"),
         )
         session.update(name=plan["app_name"])
         session.log(f"Planned {plan['app_name']}: {', '.join(p['title'] for p in plan['pages'])}", "done", model)
@@ -761,7 +784,7 @@ def _chat(pid: str, message: str):
         session.log("Working out what to change", "step")
         decision, model = llm.complete(
             "chat", ROUTER_SYSTEM, router_prompt(project, plan, message), json_mode=True, max_tokens=4000,
-            validate=llm.parse_json, on_fallback=session.fallback("Chat"),
+            validate=llm.parse_json, own=session.own, on_fallback=session.fallback("Chat"),
         )
         plan, added, edits, notes = _apply_changes(plan, decision, len(project["images"]))
         session.say(str(decision.get("reply") or "On it."))

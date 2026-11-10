@@ -12,8 +12,10 @@ import posixpath
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import backends
 import llm
 import projects
+import refsite
 from builder import (
     COLOR_KEYS,
     DEFAULT_THEME,
@@ -170,6 +172,10 @@ def _packages(values) -> list[str]:
     return sorted(set(wanted) | set(ALWAYS))
 
 
+ACCOUNT_COLLECTIONS = {"users", "user", "accounts", "account", "logins", "auth", "credentials"}
+SENSITIVE_FIELD = re.compile(r"pass(word|wd)?|secret|token|salt|hash", re.IGNORECASE)
+
+
 def normalize_plan(raw: dict, image_count: int) -> dict:
     theme_in = raw.get("theme") if isinstance(raw.get("theme"), dict) else {}
     theme = {key: _hex(theme_in.get(key), DEFAULT_THEME[key]) for key in COLOR_KEYS}
@@ -234,16 +240,22 @@ def normalize_plan(raw: dict, image_count: int) -> dict:
 
     data = {}
     raw_data = raw.get("data") if isinstance(raw.get("data"), dict) else {}
+    full_stack = raw.get("backend") in backends.LANGUAGES
     for name, records in list(raw_data.items())[:6]:
         key = re.sub(r"[^a-z0-9_]", "_", str(name).lower()).strip("_")
+        if full_stack and key in ACCOUNT_COLLECTIONS:
+            continue  # every collection becomes a public API resource; accounts are handled by the backend's sign-in
         if key and isinstance(records, list):
             data[key] = [
-                {**r, "id": str(r.get("id") or i + 1)} for i, r in enumerate(x for x in records[:40] if isinstance(x, dict))
+                {**{k: v for k, v in r.items() if not SENSITIVE_FIELD.search(str(k))}, "id": str(r.get("id") or i + 1)}
+                for i, r in enumerate(x for x in records[:40] if isinstance(x, dict))
             ]
 
     packages = _packages(list(raw.get("packages") or []) + [p for c in components for p in c["libraries"]])
     return {
         "kind": "react",
+        # Full-stack projects: the backend language; the frontend then loads its data through the API.
+        "backend": raw.get("backend") if raw.get("backend") in backends.LANGUAGES else None,
         "app_name": str(raw.get("app_name") or "My Site").strip()[:40],
         "tagline": str(raw.get("tagline") or "")[:140],
         "style": str(raw.get("style") or "")[:800],
@@ -632,6 +644,18 @@ def _data_summary(plan: dict) -> str:
     return "\n".join(out) or "(no collections)"
 
 
+def backend_note(plan: dict) -> str:
+    if not plan.get("backend"):
+        return ""
+    return (
+        f"BACKEND: this project has a real REST API ({backends.LANGUAGES[plan['backend']]['label']}), and the helpers in "
+        "src/lib/store.js load and save through it. Collections arrive a moment after the first render, so `items` can be "
+        "empty at first: show loading or empty states and never assume a record exists. Signing in is "
+        "`await login({ email, password, name })`, which throws an Error with a readable message if the password is wrong "
+        "(show it). Never call fetch yourself: use the store helpers.\n\n"
+    )
+
+
 def file_prompt(project: dict, plan: dict, spec: dict, written: dict[str, str] | None = None) -> str:
     theme = plan["theme"]
     nav = ", ".join(f"{r['title']} (\"/{'' if r['slug'] == 'index' else r['slug']}\")" for r in plan["routes"] if r["nav"])
@@ -680,7 +704,7 @@ PROJECT FILES (import from these only, with relative paths):
 DATA COLLECTIONS:
 {_data_summary(plan)}
 
-{task}"""
+{backend_note(plan)}{task}"""
 
 
 def router_prompt(project: dict, plan: dict, message: str) -> str:
@@ -737,7 +761,7 @@ def _generate(
         try:
             source, model = llm.complete(
                 "code", EDIT_SYSTEM if current else FILE_SYSTEM, prompt, images=images, max_tokens=16000,
-                validate=validate, on_fallback=session.fallback(label),
+                validate=validate, own=session.own, on_fallback=session.fallback(label),
             )
             session.log(f"{spec['path']} ready", "done", model)
             return source
@@ -762,6 +786,16 @@ def assemble(plan: dict, sources: dict[str, str]) -> dict[str, str]:
     files = scaffold(plan)
     for spec in generated_files(plan):
         files[spec["path"]] = sources.get(spec["path"]) or placeholder(spec["name"], spec["purpose"])
+    if plan.get("backend"):
+        # Full-stack: the data layer talks to the API, and the backend and project files are added.
+        # Stored with the frontend at the top level (so the preview works unchanged); the ZIP export
+        # arranges them as frontend/ and backend/.
+        files["src/lib/store.js"] = backends.STORE_API_JS
+        files["src/lib/config.js"] = backends.CONFIG_JS
+        files[".env.example"] = "# Where the backend API runs\nVITE_API_URL=http://localhost:8000\n"
+        files.update(backends.backend_files(plan, plan["backend"]))
+        files["README.md"] = backends.root_readme(plan, plan["backend"])
+        files["docker-compose.yml"] = backends.COMPOSE
     files["_src/plan.json"] = json.dumps(plan, ensure_ascii=False, indent=1)
     return files
 
@@ -779,12 +813,24 @@ def build(session, brief_text: str, image_count: int) -> None:
         f"USER'S DESCRIPTION: {project['prompt'] or '(see the image analysis)'}\n"
         f"REQUIRED FEATURES:\n{_features_text(project)}\n"
         f"UPLOADED IMAGES: {image_count}\n"
-        f"IMAGE ANALYSIS: {brief_text}"
+        f"IMAGE ANALYSIS: {brief_text}\n"
+        f"REFERENCE SITES:\n{refsite.describe(project.get('refs'))}"
     )
+    backend = project.get("backend") if project.get("kind") == "fullstack" else None
+    if backend:
+        prompt += (
+            f"\n\nFULL-STACK PROJECT with a {backends.LANGUAGES[backend]['label']} backend. Every data collection becomes "
+            "a REST resource that the frontend loads and saves through the API, so design a proper data model: "
+            "2 to 5 collections, the same fields with the same types in every record of a collection, ids as strings, "
+            "relations as '<thing>Id' fields. Plan data-driven pages: lists with search and filters, detail pages, "
+            "forms to create and edit records, and a dashboard or summary where it fits. Use 3D only if the idea asks for it. "
+            "Do NOT add a users, accounts or logins collection and never put passwords in the data: accounts and sign-in "
+            "are built into the backend (the frontend uses useAuth)."
+        )
     plan, model = llm.complete(
         "plan", PLAN_SYSTEM, prompt, json_mode=True, max_tokens=12000,
-        validate=lambda text: normalize_plan(llm.parse_json(text), image_count),
-        on_fallback=session.fallback("Planning"),
+        validate=lambda text: normalize_plan({**llm.parse_json(text), "backend": backend}, image_count),
+        own=session.own, on_fallback=session.fallback("Planning"),
     )
     session.update(name=plan["app_name"])
     session.log(
@@ -795,9 +841,16 @@ def build(session, brief_text: str, image_count: int) -> None:
     sources = _generate(session, plan, [(spec, None, None) for spec in generated_files(plan)])
     version = projects.write_version(session.pid, assemble(plan, sources), "Initial build", pages=page_slugs(plan))
     session.log(f"Version {version} is live", "done")
+    extra = ""
+    if plan.get("backend"):
+        extra = (
+            f" It comes with a {backends.LANGUAGES[plan['backend']]['label']} backend: a REST API for "
+            f"{', '.join(plan['data']) or 'your data'} with sign-in. The preview runs the frontend on sample data; "
+            "export the ZIP to run the frontend and backend together (the README has the steps)."
+        )
     session.say(
         f"I built {plan['app_name']} as a React project with {len(plan['routes'])} pages "
-        f"({', '.join(r['title'] for r in plan['routes'])}) and {len(plan['components'])} components. "
+        f"({', '.join(r['title'] for r in plan['routes'])}) and {len(plan['components'])} components.{extra} "
         "Explore the preview, open the code view to see the files, then tell me what to change."
     )
 
@@ -809,7 +862,7 @@ def chat(session, message: str, files: dict[str, str]) -> None:
     session.log("Working out what to change", "step")
     decision, model = llm.complete(
         "chat", ROUTER_SYSTEM, router_prompt(project, plan, message), json_mode=True, max_tokens=4000,
-        validate=llm.parse_json, on_fallback=session.fallback("Chat"),
+        validate=llm.parse_json, own=session.own, on_fallback=session.fallback("Chat"),
     )
     session.say(str(decision.get("reply") or "On it."))
 
@@ -984,6 +1037,7 @@ RUNNER_TEMPLATE = r"""<!DOCTYPE html>
       post({ type: "error", page: currentPage(), message: (title + ": " + message).slice(0, 1500) });
     }
   }
+  window.__NS_PREVIEW__ = true; // full-stack projects: use sample data here instead of calling the API
   window.__nsReport = function (error, stack) {
     showError("Runtime error", String((error && (error.stack || error.message)) || error) + (stack ? "\n" + stack.trim().split("\n").slice(0, 6).join("\n") : ""));
   };

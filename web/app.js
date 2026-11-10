@@ -82,6 +82,7 @@ async function syncSession(session) {
     const result = await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ access_token: session.access_token }) });
     ui.user = result.user;
     ui.usage = result.usage;
+    ui.key = result.key || null;
   } catch (e) {
     ui.user = null;
     ui.token = null;
@@ -100,6 +101,7 @@ async function signOut() {
   ui.user = null;
   ui.token = null;
   ui.usage = null;
+  ui.key = null;
   if (location.hash.startsWith("#/p/")) location.hash = "#/";
   else route();
 }
@@ -118,6 +120,7 @@ async function refreshUsage() {
   try {
     const result = await api("/api/me");
     ui.usage = result.usage;
+    ui.key = result.key || null;
     renderAccount();
   } catch (e) {
     /* shown on the next action */
@@ -152,6 +155,7 @@ function renderAccount() {
           <div class="account-who"><b>${esc(u.name || "")}</b><span>${esc(u.email)}</span></div>
           <div class="account-usage"><i data-lucide="gauge"></i>${esc(usageText())}</div>
           <a href="#/" role="menuitem" class="account-item"><i data-lucide="layout-grid"></i>My apps</a>
+          <button type="button" role="menuitem" class="account-item" data-own-key><i data-lucide="key-round"></i>${ui.key ? `Your AI key <em>${esc(ui.key.provider)} ${esc(ui.key.hint)}</em>` : "Use your own AI key"}</button>
           <button type="button" role="menuitem" class="account-item" data-signout><i data-lucide="log-out"></i>Sign out</button>
         </div>`;
       const chip = host.querySelector(".account-chip");
@@ -164,6 +168,7 @@ function renderAccount() {
         chip.setAttribute("aria-expanded", String(open));
       });
       host.querySelector("[data-signout]").addEventListener("click", signOut);
+      host.querySelector("[data-own-key]").addEventListener("click", openKeyDialog);
       host.querySelector('a[href="#/"]').addEventListener("click", () => {
         closeMenus();
         if (!location.hash.startsWith("#/p/")) setTimeout(() => scrollToSection("archive"), 50);
@@ -172,6 +177,109 @@ function renderAccount() {
     host.querySelectorAll("[data-auth]").forEach((b) => b.addEventListener("click", () => openAuth(b.dataset.auth)));
   });
   icons();
+}
+
+// Your own AI key: used first in your builds, with the shared free models as the fallback.
+const KEY_PROVIDERS = {
+  gemini: { label: "Google Gemini", model: "gemini-3.5-flash", where: "aistudio.google.com/apikey" },
+  groq: { label: "Groq", model: "openai/gpt-oss-120b", where: "console.groq.com/keys" },
+  openrouter: { label: "OpenRouter (any model)", model: "openrouter/auto", where: "openrouter.ai/settings/keys" },
+};
+
+function openKeyDialog() {
+  closeMenus();
+  let dialog = $("#auth");
+  if (!dialog) {
+    dialog = document.createElement("div");
+    dialog.id = "auth";
+    dialog.className = "auth-backdrop";
+    document.body.appendChild(dialog);
+    dialog.addEventListener("click", (e) => {
+      if (e.target === dialog) closeAuth();
+    });
+  }
+  const current = ui.key;
+  const provider = (current && current.provider) || "gemini";
+  dialog.innerHTML = `
+    <form class="auth-card" role="dialog" aria-modal="true" aria-labelledby="key-title" novalidate>
+      <button type="button" class="icon-btn auth-close" aria-label="Close" data-close><i data-lucide="x"></i></button>
+      <span class="brand-mark"><i data-lucide="key-round"></i></span>
+      <h2 id="key-title">Your own AI key</h2>
+      <p class="auth-sub">Builds use your key and model first, for better quality and 5× the daily builds. The shared free models stay as the fallback.</p>
+      ${current ? `<div class="auth-msg ok">In use: ${esc(KEY_PROVIDERS[current.provider] ? KEY_PROVIDERS[current.provider].label : current.provider)} · ${esc(current.model)} · key ending ${esc(current.hint)}</div>` : ""}
+      <label class="auth-field"><span>Provider</span>
+        <select name="provider">${Object.entries(KEY_PROVIDERS).map(([k, v]) => `<option value="${k}" ${k === provider ? "selected" : ""}>${v.label}</option>`).join("")}</select>
+      </label>
+      <label class="auth-field"><span>Model</span>
+        <input name="model" type="text" autocomplete="off" spellcheck="false" value="${esc(current ? current.model : KEY_PROVIDERS[provider].model)}">
+      </label>
+      <label class="auth-field"><span>API key</span>
+        <input name="key" type="password" autocomplete="off" spellcheck="false" placeholder="${current ? "Paste a new key to replace it" : "Paste your key"}">
+      </label>
+      <p class="fine" id="key-where"></p>
+      <div class="auth-msg" role="status" hidden></div>
+      <button type="submit" class="btn btn-accent auth-submit">Check and save</button>
+      ${current ? `<button type="button" class="btn btn-ghost" data-remove>Remove my key</button>` : ""}
+      <p class="fine">Your key is encrypted before it is stored, is never shown again, and is only used for your own builds.</p>
+    </form>`;
+  dialog.hidden = false;
+  document.body.classList.add("auth-open");
+  icons();
+  const form = dialog.querySelector("form");
+  const msg = form.querySelector(".auth-msg[role=status]");
+  const say = (text, tone = "bad") => {
+    msg.hidden = !text;
+    msg.className = `auth-msg ${tone}`;
+    msg.textContent = text;
+  };
+  const where = () => {
+    const p = KEY_PROVIDERS[form.provider.value];
+    $("#key-where").textContent = `Get a key at ${p.where}. For OpenRouter, the model can be any id from their list.`;
+  };
+  where();
+  form.provider.addEventListener("change", () => {
+    form.model.value = KEY_PROVIDERS[form.provider.value].model;
+    where();
+  });
+  form.querySelector("[data-close]").addEventListener("click", closeAuth);
+  const submit = form.querySelector(".auth-submit");
+  const apply = (result) => {
+    ui.key = result.key;
+    ui.usage = result.usage;
+    renderAccount();
+  };
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!form.key.value.trim()) return say("Paste your API key.");
+    say("");
+    submit.disabled = true;
+    submit.textContent = "Checking the key…";
+    try {
+      apply(await api("/api/key", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: form.provider.value, model: form.model.value.trim(), key: form.key.value.trim() }),
+      }));
+      closeAuth();
+      flash("Your key works and is saved. Your builds will use it first.", "ok");
+    } catch (error) {
+      say(error.message);
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "Check and save";
+    }
+  });
+  const remove = form.querySelector("[data-remove]");
+  if (remove) {
+    remove.addEventListener("click", async () => {
+      try {
+        apply(await api("/api/key", { method: "DELETE" }));
+        closeAuth();
+        flash("Your key was removed.", "ok");
+      } catch (error) {
+        say(error.message);
+      }
+    });
+  }
 }
 
 function closeMenus() {
@@ -369,6 +477,11 @@ const TEMPLATES = [
     features: "3D product that rotates as you scroll\nFeature highlights revealed with scroll animations\nTech specs comparison\nCustomer testimonials carousel\nPre-order form with colour selection",
   },
   {
+    label: "Inventory app", icon: "database", kind: "fullstack", backend: "python",
+    prompt: "An inventory manager for a small shop: track products, stock levels and suppliers, and record orders.",
+    features: "Product list with search, category filter and low-stock highlight\nAdd, edit and delete products\nProduct detail page with stock history\nSuppliers list\nOrders: create an order and reduce stock\nDashboard with totals and low-stock alerts\nSign in",
+  },
+  {
     label: "Online store", icon: "shopping-bag",
     prompt: "A modern online store for handmade ceramics: mugs, bowls and vases from small studios.",
     features: "Product catalogue with search and category filters\nProduct detail page with reviews\nShopping cart with quantity changes and live totals\nCheckout form with order confirmation\nCustomer account with order history",
@@ -394,8 +507,11 @@ const SUGGESTIONS = ["Switch to a dark theme", "Add a settings page", "Make the 
 const REACT_SUGGESTIONS = ["Add a 3D scene to the hero", "Add scroll animations", "Add a contact page", "Switch to a dark theme"];
 const KINDS = {
   site: { label: "Website prototype", note: "Multi-page HTML, fastest to build" },
-  react: { label: "React app", note: "React + 3D + motion, real project ZIP" },
+  react: { label: "React app", note: "React, 3D and motion, real project ZIP" },
+  fullstack: { label: "Full-stack app", note: "React frontend + backend API" },
 };
+const BACKENDS = { python: "Python · FastAPI", node: "Node.js · Express", java: "Java" };
+const FULLSTACK_SUGGESTIONS = ["Add a dashboard with totals", "Add search and filters to the list", "Add a form to create records", "Add a sign-in page"];
 
 const STEPS = [
   { title: "Analyse", tag: "vision model · opencv", text: "A vision model reads your images: layout, components, text and style. Paper sketches are cleaned up with OpenCV first, lifting shadows and sharpening the lines, so nothing you drew is missed." },
@@ -407,7 +523,7 @@ const STEPS = [
 
 const CHAIN_LABELS = { VISION: "Image analysis", PLAN: "Planning", CODE: "Page code", CHAT: "Chat edits" };
 
-const ui = { files: [], status: null, project: null, page: "index", viewVersion: null, device: "desktop", showCode: false, poll: null, error: null, loadedSrc: null, kind: "site" };
+const ui = { files: [], status: null, project: null, page: "index", viewVersion: null, device: "desktop", showCode: false, poll: null, error: null, loadedSrc: null, kind: "site", backend: "python", key: null };
 
 function setKind(kind) {
   ui.kind = KINDS[kind] ? kind : "site";
@@ -415,9 +531,21 @@ function setKind(kind) {
     b.classList.toggle("on", b.dataset.kind === ui.kind);
     b.setAttribute("aria-checked", String(b.dataset.kind === ui.kind));
   });
+  const pick = $("#backend-pick");
+  if (pick) pick.hidden = ui.kind !== "fullstack";
+  refreshTriggers();
 }
 
-const isReact = () => Boolean(ui.project && ui.project.kind === "react");
+function setBackend(language) {
+  ui.backend = BACKENDS[language] ? language : "python";
+  $$("[data-backend]").forEach((b) => {
+    b.classList.toggle("on", b.dataset.backend === ui.backend);
+    b.setAttribute("aria-checked", String(b.dataset.backend === ui.backend));
+  });
+}
+
+// React and full-stack projects share the React preview, file browser and auto-fix.
+const isReact = () => Boolean(ui.project && (ui.project.kind === "react" || ui.project.kind === "fullstack"));
 
 // Where the current page of the viewed version is previewed. React projects are one app with
 // routes after the #; HTML sites have a file per page.
@@ -569,6 +697,12 @@ async function renderHome() {
               <div class="kind-pick" role="radiogroup" aria-label="Project type">
                 ${Object.entries(KINDS).map(([k, v]) => `<button type="button" role="radio" data-kind="${k}" class="kind ${k === ui.kind ? "on" : ""}" aria-checked="${k === ui.kind}"><b>${v.label}</b><span>${v.note}</span></button>`).join("")}
               </div>
+              <div id="backend-pick" class="backend-pick" ${ui.kind === "fullstack" ? "" : "hidden"}>
+                <span>Backend language</span>
+                <div role="radiogroup" aria-label="Backend language">
+                  ${Object.entries(BACKENDS).map(([k, label]) => `<button type="button" role="radio" data-backend="${k}" class="pill ${k === ui.backend ? "on" : ""}" aria-checked="${k === ui.backend}">${label}</button>`).join("")}
+                </div>
+              </div>
               <div class="field-label"><span>Fig. 1</span>Sketches &amp; screenshots</div>
               <label id="dropzone" class="dropzone">
                 <span class="dz-icon"><i data-lucide="image-plus"></i></span>
@@ -581,6 +715,9 @@ async function renderHome() {
               <textarea id="prompt" class="ta ta-brief" rows="2" placeholder="Describe your app: what is it, who is it for?"></textarea>
               <label class="field-label" for="features"><span>Fig. 3</span>Features, one per line</label>
               <textarea id="features" class="ta ta-lined" rows="5" placeholder="e.g. Product catalogue with filters&#10;Shopping cart&#10;Checkout"></textarea>
+              <label class="field-label" for="references"><span>Fig. 4</span>Reference websites <em>optional</em></label>
+              <textarea id="references" class="ta ta-refs" rows="2" placeholder="Links to sites you like, one per line (up to 3)&#10;e.g. https://linear.app"></textarea>
+              <p class="fine field-note">Their layout, colours and fonts are used as inspiration. Your site gets its own text and branding.</p>
             </div>
             <div class="composer-foot">
               <p class="fine">Powered by Gemini, Groq and OpenRouter free tiers: if one is busy, the next takes over.</p>
@@ -800,6 +937,8 @@ async function loadProjects() {
     .map((p, i) => {
       const thumb = p.kind === "react" && p.current
         ? `<div class="thumb-react"><i data-lucide="box"></i><span>React project</span></div>`
+        : p.kind === "fullstack" && p.current
+        ? `<div class="thumb-react"><i data-lucide="server"></i><span>Full-stack project</span></div>`
         : p.current
         ? `<iframe src="${PREVIEW}/preview/${p.id}/${p.current}/index.html" tabindex="-1" loading="lazy" title="" aria-hidden="true"></iframe>`
         : p.thumbnail
@@ -891,12 +1030,14 @@ function bindComposer() {
   });
 
   $$("[data-kind]").forEach((button) => button.addEventListener("click", () => setKind(button.dataset.kind)));
+  $$("[data-backend]").forEach((button) => button.addEventListener("click", () => setBackend(button.dataset.backend)));
   $$("[data-template]").forEach((button) =>
     button.addEventListener("click", () => {
       const t = TEMPLATES[button.dataset.template];
       $("#prompt").value = t.prompt;
       $("#features").value = t.features;
       setKind(t.kind || "site");
+      if (t.backend) setBackend(t.backend);
       $$("[data-template]").forEach((b) => b.classList.toggle("on", b === button));
     }),
   );
@@ -904,8 +1045,9 @@ function bindComposer() {
   $("#composer").addEventListener("submit", async (e) => {
     e.preventDefault();
     const prompt = $("#prompt").value.trim();
-    if (!prompt && !ui.files.length) {
-      flash("Add a sketch or describe your app first.");
+    const references = $("#references").value.trim();
+    if (!prompt && !ui.files.length && !references) {
+      flash("Add a sketch, a reference site or a description first.");
       return;
     }
     if (ui.booting) {
@@ -932,6 +1074,8 @@ function bindComposer() {
       form.append("prompt", prompt);
       form.append("features", $("#features").value);
       form.append("kind", ui.kind);
+      form.append("backend", ui.backend);
+      form.append("references", references);
       for (const { file } of ui.files) form.append("images", await shrinkImage(file));
       const { id } = await api("/api/projects", { method: "POST", body: form });
       ui.files = [];
@@ -1163,6 +1307,8 @@ function renderTimeline() {
       ${p.images.length ? `<div class="brief-images">${p.images.map((img, i) => `<a href="/api/projects/${p.id}/uploads/${img.file}" target="_blank" rel="noopener" style="--r:${((i % 3) - 1) * 2}deg"><img src="/api/projects/${p.id}/uploads/${img.file}" alt="Upload ${i}"><span>${i} · ${esc(img.kind)}</span></a>`).join("")}</div>` : ""}
       ${p.prompt ? `<p class="brief-prompt">${esc(p.prompt)}</p>` : ""}
       ${p.features.length ? `<ul class="brief-features">${p.features.map((f) => `<li><i data-lucide="check"></i>${esc(f)}</li>`).join("")}</ul>` : ""}
+      ${p.kind !== "site" ? `<div class="brief-tags"><span>${esc(KINDS[p.kind] ? KINDS[p.kind].label : p.kind)}</span>${p.backend ? `<span>${esc(BACKENDS[p.backend] || p.backend)} backend</span>` : ""}</div>` : ""}
+      ${(p.refs || []).length ? `<ul class="brief-refs">${p.refs.map((r) => `<li class="${r.error ? "bad" : ""}" title="${esc(r.error || "")}"><i data-lucide="${r.error ? "link-2-off" : "link"}"></i><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer">${esc(r.url.replace(/^https?:\/\//, "").replace(/\/$/, ""))}</a>${r.error ? `<em>couldn't be read</em>` : ""}</li>`).join("")}</ul>` : ""}
     </div>`;
 
   const items = [...p.chat.map((m) => ({ ...m, type: "chat" })), ...p.log.map((l) => ({ ...l, type: "log" }))].sort((a, b) => a.t - b.t);
@@ -1194,7 +1340,7 @@ function renderTimeline() {
 
   const suggestions = $("#suggestions");
   suggestions.innerHTML = p.current && !busy()
-    ? (isReact() ? REACT_SUGGESTIONS : SUGGESTIONS).map((s) => `<button type="button" class="chip">${esc(s)}</button>`).join("")
+    ? (p.kind === "fullstack" ? FULLSTACK_SUGGESTIONS : isReact() ? REACT_SUGGESTIONS : SUGGESTIONS).map((s) => `<button type="button" class="chip">${esc(s)}</button>`).join("")
     : "";
   suggestions.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => sendMessage(p.id, b.textContent)));
 }

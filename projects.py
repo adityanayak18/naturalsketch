@@ -20,7 +20,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 ID_PATTERN = re.compile(r"^[a-f0-9]{10}$")
-UPDATABLE = {"name", "prompt", "brief", "status", "error"}
+UPDATABLE = {"name", "prompt", "brief", "status", "error", "refs"}
 
 SCHEMA_SQL = """
 create schema if not exists naturalsketch;
@@ -89,6 +89,20 @@ create index if not exists logs_by_project on naturalsketch.logs (project_id, id
 alter table naturalsketch.projects add column if not exists owner_id text;
 -- 'site' (multi-page HTML prototype) or 'react' (a Vite + React project).
 alter table naturalsketch.projects add column if not exists kind text not null default 'site';
+-- Full-stack projects: the backend language ('python', 'node' or 'java').
+alter table naturalsketch.projects add column if not exists backend text;
+-- Reference websites the user pointed at: [{"url": ..., "summary": {...} or "error": "..."}].
+alter table naturalsketch.projects add column if not exists refs jsonb not null default '[]';
+
+-- A user's own AI provider key (encrypted), used first in their builds.
+create table if not exists naturalsketch.user_keys (
+    owner_id   text primary key,
+    provider   text not null,
+    model      text not null,
+    key_enc    text not null,
+    hint       text not null,
+    updated_at timestamptz not null default now()
+);
 create index if not exists projects_by_owner on naturalsketch.projects (owner_id, updated_at desc);
 
 -- Builds and chat edits per user per day, so one account can't use up the shared AI quota.
@@ -176,13 +190,14 @@ def _check(pid: str) -> None:
 # ---------------------------------------------------------------- projects
 
 def create(prompt: str, features: list[str], images: list[tuple[bytes, str, str]], owner: str | None = None,
-           kind: str = "site") -> str:
+           kind: str = "site", backend: str | None = None, refs: list[dict] | None = None) -> str:
     """images: (data, mime, kind) where kind is 'sketch' or 'screenshot'. Returns the new id."""
     pid = secrets.token_hex(5)
     with pool().connection() as conn, conn.transaction():
         conn.execute(
-            "insert into naturalsketch.projects (id, prompt, features, owner_id, kind) values (%s, %s, %s, %s, %s)",
-            (pid, prompt, Jsonb(features), owner, kind),
+            "insert into naturalsketch.projects (id, prompt, features, owner_id, kind, backend, refs) "
+            "values (%s, %s, %s, %s, %s, %s, %s)",
+            (pid, prompt, Jsonb(features), owner, kind, backend, Jsonb(refs or [])),
         )
         for index, (data, mime, kind) in enumerate(images):
             conn.execute(
@@ -197,7 +212,7 @@ def load(pid: str) -> dict:
     _check(pid)
     row = _one(
         """
-        select p.id, p.name, p.prompt, p.features, p.brief, p.status, p.error, p.kind,
+        select p.id, p.name, p.prompt, p.features, p.brief, p.status, p.error, p.kind, p.backend, p.refs, p.owner_id as owner,
                p.current_version as current,
                extract(epoch from p.created_at)::float8 as created,
                extract(epoch from p.updated_at)::float8 as updated,
@@ -281,7 +296,7 @@ def update(pid: str, **fields) -> None:
     if not fields:
         return
     assignments = ", ".join(f"{name} = %s" for name in fields)
-    values = [Jsonb(v) if name == "brief" and v is not None else v for name, v in fields.items()]
+    values = [Jsonb(v) if name in ("brief", "refs") and v is not None else v for name, v in fields.items()]
     _run(f"update naturalsketch.projects set {assignments}, updated_at = now() where id = %s", (*values, pid))
 
 
@@ -378,3 +393,25 @@ def read_file(pid: str, version: int, path: str) -> str | None:
         (pid, version, path),
     )
     return row["content"] if row else None
+
+
+# ---------------------------------------------------------------- users' own AI keys
+
+def get_user_key(owner: str) -> dict | None:
+    return _one("select provider, model, key_enc, hint from naturalsketch.user_keys where owner_id = %s", (owner,))
+
+
+def set_user_key(owner: str, provider: str, model: str, key_enc: str, hint: str) -> None:
+    _run(
+        """
+        insert into naturalsketch.user_keys (owner_id, provider, model, key_enc, hint) values (%s, %s, %s, %s, %s)
+        on conflict (owner_id) do update
+        set provider = excluded.provider, model = excluded.model, key_enc = excluded.key_enc,
+            hint = excluded.hint, updated_at = now()
+        """,
+        (owner, provider, model, key_enc, hint),
+    )
+
+
+def delete_user_key(owner: str) -> None:
+    _run("delete from naturalsketch.user_keys where owner_id = %s", (owner,))
