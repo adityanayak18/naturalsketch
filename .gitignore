@@ -1,7 +1,32 @@
-.venv/
+# Secrets and local settings (never commit these)
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+.venv/
+venv/
 __pycache__/
-data/
-.vs/
 *.pyc
+
+# Local data and databases
+data/
+*.sqlite3
+*.db
+
+# Node and build output
+node_modules/
+dist/
+
+# Editors and OS
+.vs/
 .vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and downloads
+*.log
+*.zip
