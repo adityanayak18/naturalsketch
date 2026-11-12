@@ -75,19 +75,35 @@ async function initAuth(config) {
 }
 
 // Hand the access token to the server, which keeps it in an HttpOnly cookie for this domain.
-async function syncSession(session) {
-  if (!session || session.access_token === ui.token) return;
+// Supabase's sign-in event and our own startup check can both call this for the same token;
+// the second caller waits for the first one's request instead of returning before it finishes.
+function syncSession(session) {
+  if (!session) return Promise.resolve();
+  if (session.access_token === ui.token) return ui.syncing || Promise.resolve();
   ui.token = session.access_token;
-  try {
-    const result = await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ access_token: session.access_token }) });
-    ui.user = result.user;
-    ui.usage = result.usage;
-    ui.key = result.key || null;
-  } catch (e) {
-    ui.user = null;
-    ui.token = null;
-  }
-  renderAccount();
+  const wasSignedIn = signedIn();
+  const run = (async () => {
+    try {
+      const result = await api("/api/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ access_token: session.access_token }) });
+      ui.user = result.user;
+      ui.usage = result.usage;
+      ui.key = result.key || null;
+    } catch (e) {
+      ui.user = null;
+      ui.token = null;
+    }
+    renderAccount();
+    if (signedIn()) {
+      const dialog = $("#auth");
+      if (dialog && !dialog.hidden && (dialog.dataset.mode === "signin" || dialog.dataset.mode === "signup")) closeAuth(); // a sign-in prompt opened while this was in flight
+      if (!wasSignedIn && !ui.booting && $("#project-list")) loadProjects();
+    }
+  })();
+  ui.syncing = run;
+  run.finally(() => {
+    if (ui.syncing === run) ui.syncing = null;
+  });
+  return run;
 }
 
 async function signOut() {
@@ -218,6 +234,7 @@ function openKeyDialog() {
       if (e.target === dialog) closeAuth();
     });
   }
+  dialog.dataset.mode = "key";
   const current = ui.key;
   const provider = (current && current.provider) || "gemini";
   dialog.innerHTML = `
@@ -332,6 +349,7 @@ function openAuth(mode = "signin", note = "") {
   };
   const [title, sub] = titles[mode];
   const google = mode === "signin" || mode === "signup";
+  dialog.dataset.mode = mode;
   dialog.innerHTML = `
     <form class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title" novalidate>
       <button type="button" class="icon-btn auth-close" aria-label="Close" data-close><i data-lucide="x"></i></button>
