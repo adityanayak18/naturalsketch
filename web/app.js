@@ -127,7 +127,27 @@ async function refreshUsage() {
   }
 }
 
+// The line under the Build button: which models are used, and a visible way to add your own key.
+function keyNote() {
+  const free = "Free models by default (Gemini, Groq, OpenRouter): if one is busy, the next takes over.";
+  if (!authState.enabled || !signedIn()) return esc(free);
+  if (ui.key) {
+    return `Using your own key (${esc(ui.key.provider)} · ${esc(ui.key.model)}) first, free models as fallback. <button type="button" class="link-btn" data-own-key>Change key</button>`;
+  }
+  return `${esc(free)} <button type="button" class="link-btn" data-own-key><i data-lucide="key-round"></i>Use your own AI key</button> for better results and 5× the daily builds.`;
+}
+
+function renderKeyNote() {
+  const note = $("#key-note");
+  if (!note) return;
+  note.innerHTML = keyNote();
+  const button = note.querySelector("[data-own-key]");
+  if (button) button.addEventListener("click", openKeyDialog);
+  icons();
+}
+
 function renderAccount() {
+  renderKeyNote();
   $$(".account").forEach((host) => {
     if (ui.booting) {  // the server may be waking up: say so instead of showing nothing
       host.innerHTML = `<span class="account-wait"><i data-lucide="loader-2" class="spin"></i>Connecting…</span>`;
@@ -659,8 +679,7 @@ async function renderHome() {
             <button type="button" data-scroll="method">Method</button>
             <button type="button" data-scroll="archive">Archive</button>
           </nav>
-          <div id="providers" class="providers"></div>
-          <div class="account"></div>
+          <div class="account account-end"></div>
         </div>
       </header>
 
@@ -720,7 +739,7 @@ async function renderHome() {
               <p class="fine field-note">Their layout, colours and fonts are used as inspiration. Your site gets its own text and branding.</p>
             </div>
             <div class="composer-foot">
-              <p class="fine">Powered by Gemini, Groq and OpenRouter free tiers: if one is busy, the next takes over.</p>
+              <p class="fine" id="key-note">${keyNote()}</p>
               <button id="build" type="submit" class="btn btn-accent"><i data-lucide="sparkles"></i><span>Build app</span></button>
             </div>
           </form>
@@ -878,11 +897,6 @@ function initHomeMotion() {
 async function loadStatus() {
   await ui.ready; // the startup code fetches it once
   if (!ui.status) return;
-  const host = $("#providers");
-  if (!host) return;
-  host.innerHTML = Object.entries(ui.status.providers)
-    .map(([name, ok]) => `<span class="provider ${ok ? "on" : ""}" title="${ok ? "API key configured" : "No API key"}"><i></i>${esc(name)}</span>`)
-    .join("");
   const chains = $("#chains");
   if (chains && ui.status.chains) {
     const cooling = ui.status.cooling_down || {};
@@ -954,11 +968,21 @@ async function loadProjects() {
             <div class="card-meta">${timeAgo(p.updated)} · ${p.versions} version${p.versions === 1 ? "" : "s"}</div>
           </div>
           <span class="stamp stamp-${tone}">${esc(p.status)}</span>
-          <button type="button" data-delete="${p.id}" title="Delete" aria-label="Delete ${esc(p.name)}" class="card-del"><i data-lucide="trash-2"></i></button>
+          <span class="card-tools">
+            ${p.current ? `<button type="button" data-export="${p.id}" data-version="${p.current}" title="Export ZIP" aria-label="Export ${esc(p.name)} as a ZIP" class="card-tool"><i data-lucide="download"></i></button>` : ""}
+            <button type="button" data-delete="${p.id}" title="Delete" aria-label="Delete ${esc(p.name)}" class="card-tool card-del"><i data-lucide="trash-2"></i></button>
+          </span>
         </a>`;
     })
     .join("");
   icons();
+  host.querySelectorAll("[data-export]").forEach((button) =>
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      location.href = `/api/projects/${button.dataset.export}/download?version=${button.dataset.version}`;
+    }),
+  );
   host.querySelectorAll("[data-delete]").forEach((button) =>
     button.addEventListener("click", async (event) => {
       event.preventDefault();
@@ -1157,7 +1181,7 @@ async function openProject(pid) {
         <div class="ws-actions">
           <label class="select-wrap" title="Versions"><i data-lucide="history"></i><select id="versions" aria-label="Version"></select></label>
           <a id="open-tab" target="_blank" rel="noopener" class="btn btn-ghost sm hide-sm"><i data-lucide="external-link"></i>Open</a>
-          <a id="download" class="btn btn-accent sm"><i data-lucide="download"></i>Export</a>
+          <a id="download" class="btn btn-accent sm" title="Download the code as a ZIP"><i data-lucide="download"></i>Export<span class="hide-sm">&nbsp;ZIP</span></a>
           <div class="account"></div>
         </div>
       </header>
